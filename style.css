@@ -1,0 +1,108 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  overflow: hidden; /* Prevent native scrollbars globally */
+  background-color: #f3f4f6; /* Soft gray backing */
+  touch-action: none; /* Native browser gestures disabled */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#app {
+  width: 100vw;
+  height: 100dvh; /* Dynamic viewport for modern mobile */
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+#notebook-container {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  transform-style: preserve-3d;
+  perspective: 1200px;
+}
+
+/* Base styling for each page DOM node */
+.page {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: #ffffff;
+  /* Ruled lines using repeating-linear-gradient */
+  background-image: repeating-linear-gradient(transparent, transparent 31px, #e5e7eb 31px, #e5e7eb 32px);
+  background-position: 0 40px; /* offset the top margin */
+  box-shadow: 0 0 30px rgba(0, 0, 0, 0.05); /* Soft drop shadow across pages */
+  will-change: transform;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Vertical red margin line common in notebooks */
+.page::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 32px;
+  width: 1px;
+  background-color: rgba(239, 68, 68, 0.4); /* soft red */
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Transition is added ONLY when snapping via JS */
+.page.animating {
+  transition: transform 0.35s cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.page-number {
+  position: absolute;
+  bottom: 16px;
+  width: 100%;
+  text-align: center;
+  color: #9ca3af;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* The actual user-created inputs */
+.text-block {
+  position: absolute;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-size: 16px;
+  /* Line height matches the 32px gradient gap so it aligns visually */
+  line-height: 32px;
+  color: #1f2937;
+  padding: 0 8px; /* Slight horizontal visual padding */
+  min-width: 20px;
+  max-width: calc(100% - 48px); /* Leaving room so text doesn't hit edge */
+  word-wrap: break-word;
+  white-space: pre-wrap;
+  cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
+  z-index: 10;
+}
+
+/* Focus indicator when typing */
+.text-block:focus {
+  background: rgba(59, 130, 246, 0.05);
+  border-radius: 4px;
+}
