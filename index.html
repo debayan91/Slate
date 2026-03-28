@@ -21,6 +21,12 @@
     
     <div class="header-center" id="date-title"></div>
 
+    <!-- Sync UI -->
+    <div id="sync-status" class="hidden" aria-live="polite">
+      <span class="sync-icon"></span>
+      <span class="sync-text">Saved</span>
+    </div>
+
     <!-- Google Identity Services Container -->
     <div id="auth-container">
       <div id="g_id_onload"
@@ -36,7 +42,8 @@
       <div id="user-profile" class="hidden">
         <img id="user-avatar" src="" alt="Profile" tabindex="0">
         <div id="user-menu" class="hidden">
-           <button id="logout-btn">Log out</button>
+           <button id="export-btn" class="menu-btn">Export JSON</button>
+           <button id="logout-btn" class="menu-btn danger">Log out</button>
         </div>
       </div>
     </div>
@@ -56,10 +63,24 @@
       <div id="gallery-scroller">
         <!-- Month headers & grids injected via script.js -->
       </div>
+      
+      <!-- Empty State -->
+      <div id="gallery-empty" class="hidden">
+        <svg viewBox="0 0 24 24" width="48" height="48" stroke="currentColor" stroke-width="1.5" fill="none"><path d="M12 20h9M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
+        <h3>No Pages Yet</h3>
+        <p>Start writing to create your first entry.</p>
+        <button id="new-page-btn" class="primary-btn">New Page</button>
+      </div>
     </main>
   </div>
   
+  <!-- App Status Overlays -->
+  <div id="toast-container"></div>
+  <div id="app-loading">
+    <div class="spinner"></div>
+  </div>
+  
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <script src="script.js"></script>
+  <script src="main.js" type="module"></script>
 </body>
 </html>
