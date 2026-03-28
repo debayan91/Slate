@@ -1,33 +1,57 @@
 /**
  * SLATE — app.js
- * Single, clean, zero-dependency application logic.
- * Strict desktop/mobile separation. 100% localStorage persistence.
+ * Full implementation per formal feature specification.
+ * Free-form spatially-positioned writing, 3-spread DOM,
+ * strict device separation, PWA, autosave, undo, gallery.
  */
-
 'use strict';
 
-// ─── Constants ─────────────────────────────────────────────────────────────
-const STORAGE_KEY = 'slate_v1_pages';
-const AUTOSAVE_DELAY = 800; // ms
-const IS_MOBILE = window.matchMedia('(max-width: 767px)').matches ||
-                  window.matchMedia('(pointer: coarse)').matches;
+/* ═══════════════════════════════════════════════════════════
+   CONSTANTS
+═══════════════════════════════════════════════════════════ */
+const STORAGE_KEY    = 'slate_v2';
+const LINE_H         = 32;    // px — must match CSS --line-h
+const LINE_OFFSET_D  = 56;    // desktop: first line Y
+const LINE_OFFSET_M  = 52;    // mobile:  first line Y
+const MARGIN_LEFT_D  = 68;    // desktop red-margin X
+const MARGIN_LEFT_M  = 40;    // mobile red-margin X
+const PROX_Y         = 18;    // px, Y proximity for block continuation
+const PROX_X         = 140;   // px, X proximity
+const PINCH_THRESH   = 60;    // px of pinch shrink → gallery
+const SWIPE_VEL      = 0.28;  // px/ms threshold for fast swipe
+const SWIPE_PCT      = 0.22;  // % viewport for distance threshold
+const SPREAD_DUR     = 320;   // ms, spread animation
+const AUTOSAVE_MS    = 900;   // ms debounce delay
+const UNDO_LIMIT     = 50;
 
-// ─── State ─────────────────────────────────────────────────────────────────
+/* ═══════════════════════════════════════════════════════════
+   DEVICE DETECTION — locked at boot, strictly enforced
+═══════════════════════════════════════════════════════════ */
+const IS_MOBILE = (() => {
+  const coarse = window.matchMedia('(pointer: coarse)').matches;
+  const narrow = window.innerWidth < 768;
+  return coarse || narrow;
+})();
+
+/* ═══════════════════════════════════════════════════════════
+   STATE
+═══════════════════════════════════════════════════════════ */
 const state = {
-  pages: [],         // Array<{ id, createdAt, updatedAt, content }>
-  activePageId: null,
-  user: null,        // { name, email, picture } | null
-  saveTimer: null,
-  isOnline: navigator.onLine,
+  pages:       [],   // Array<Page>  { id, date, elements: [{id,x,y,content}] }
+  spreadIdx:   0,    // current spread index
+  view:        'notebook', // 'notebook' | 'gallery'
+  undoStack:   [],
+  user:        null, // { name, email, picture }
+  online:      navigator.onLine,
+  saveTimer:   null,
+  animating:   false,
 };
 
-// ─── DOM References ─────────────────────────────────────────────────────────
-// Populated after DOMContentLoaded
-let DOM = {};
-
-// ─── Utils ──────────────────────────────────────────────────────────────────
+/* ═══════════════════════════════════════════════════════════
+   HELPERS
+═══════════════════════════════════════════════════════════ */
 function uid() {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
 
 function debounce(fn, ms) {
@@ -35,71 +59,70 @@ function debounce(fn, ms) {
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
 }
 
-function formatDate(iso) {
-  const d = new Date(iso);
-  const now = new Date();
+function formatDate(isoStr) {
+  const d = new Date(isoStr);
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function formatDateShort(isoStr) {
+  const d = new Date(isoStr), now = new Date();
   const diff = now - d;
   if (diff < 60_000) return 'Just now';
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+  if (d.toDateString() === now.toDateString()) return 'Today';
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
-function stripHtml(html) {
-  const div = document.createElement('div');
-  div.innerHTML = html;
-  return div.textContent || div.innerText || '';
+function monthKey(isoStr) {
+  const d = new Date(isoStr);
+  return d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 }
 
-function pageTitle(page) {
-  const text = (typeof page.content === 'string' ? stripHtml(page.content) : '').trim();
-  const firstLine = text.split('\n')[0].trim();
-  return firstLine.length > 0 ? firstLine.substring(0, 50) : 'Untitled page';
+function pagesPerSpread() { return IS_MOBILE ? 1 : 2; }
+
+function spreadCount() {
+  return Math.max(1, Math.ceil(state.pages.length / pagesPerSpread()));
 }
 
-// ─── Toast ──────────────────────────────────────────────────────────────────
-function showToast(msg, type = '') {
-  const el = document.createElement('div');
-  el.className = `toast ${type}`.trim();
-  el.textContent = msg;
-  DOM.toastContainer.appendChild(el);
-  setTimeout(() => {
-    el.style.opacity = '0';
-    el.style.transition = 'opacity 300ms';
-    setTimeout(() => el.remove(), 300);
-  }, 2500);
+function pageIndicesForSpread(si) {
+  const pps = pagesPerSpread();
+  const base = si * pps;
+  return IS_MOBILE ? [base] : [base, base + 1];
 }
 
-// ─── Confirm Dialog ─────────────────────────────────────────────────────────
-function showConfirm(msg) {
-  return new Promise((resolve) => {
-    DOM.confirmMessage.textContent = msg;
-    DOM.confirmOverlay.classList.remove('hidden');
-    const onOk = () => { cleanup(); resolve(true); };
-    const onCancel = () => { cleanup(); resolve(false); };
-    const cleanup = () => {
-      DOM.confirmOk.removeEventListener('click', onOk);
-      DOM.confirmCancel.removeEventListener('click', onCancel);
-      DOM.confirmOverlay.classList.add('hidden');
-    };
-    DOM.confirmOk.addEventListener('click', onOk);
-    DOM.confirmCancel.addEventListener('click', onCancel);
-  });
+function lineOffset()  { return IS_MOBILE ? LINE_OFFSET_M : LINE_OFFSET_D; }
+function marginLeft()  { return IS_MOBILE ? MARGIN_LEFT_M : MARGIN_LEFT_D; }
+
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+function snapY(rawY) {
+  const lo = lineOffset();
+  if (rawY < lo) return lo;
+  return lo + Math.round((rawY - lo) / LINE_H) * LINE_H;
 }
 
-// ─── Persistence ────────────────────────────────────────────────────────────
+function pageTextContent(page) {
+  return page.elements.map(e => {
+    const d = document.createElement('div');
+    d.innerHTML = e.content || '';
+    return d.textContent || '';
+  }).join(' ').trim();
+}
+
+/* ═══════════════════════════════════════════════════════════
+   PERSISTENCE
+═══════════════════════════════════════════════════════════ */
 function loadData() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return;
     const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      state.pages = parsed;
-    }
+    if (!Array.isArray(parsed)) throw new Error('Invalid');
+    state.pages = parsed;
   } catch (e) {
-    console.warn('Slate: Failed to parse saved data. Starting fresh.', e);
+    console.warn('[Slate] Load failed, starting fresh:', e);
     state.pages = [];
-    showToast('Could not load saved notes', 'error');
+    toast('Storage error — starting fresh', 'err');
   }
 }
 
@@ -108,578 +131,954 @@ function saveData() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state.pages));
     setSyncStatus('saved');
   } catch (e) {
-    console.warn('Slate: Failed to save data.', e);
-    showToast('Failed to save', 'error');
+    toast('Failed to save', 'err');
   }
 }
 
-function exportData() {
-  const payload = JSON.stringify(state.pages, null, 2);
-  const blob = new Blob([payload], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `slate-export-${new Date().toISOString().split('T')[0]}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
-  showToast('Notes exported', 'success');
-}
-
-// ─── Sync Status UI ─────────────────────────────────────────────────────────
-function setSyncStatus(status) {
-  // status: 'saving' | 'saved' | 'offline'
-  const pills = [DOM.sidebarStatus, DOM.toolbarStatus, DOM.mStatus].filter(Boolean);
-  pills.forEach(el => {
-    el.className = 'status-pill';
-    if (status === 'saving') {
-      el.classList.add('saving');
-      el.textContent = 'Saving…';
-    } else if (status === 'offline') {
-      el.classList.add('offline');
-      el.textContent = 'Offline';
-    } else {
-      el.textContent = 'Saved';
-    }
-  });
-}
-
-function scheduleSave() {
+function triggerSave() {
   setSyncStatus('saving');
   clearTimeout(state.saveTimer);
   state.saveTimer = setTimeout(() => {
+    pushUndo();
     saveData();
-  }, AUTOSAVE_DELAY);
+  }, AUTOSAVE_MS);
 }
 
-// ─── Page Management ────────────────────────────────────────────────────────
-function createPage() {
-  const page = {
-    id: uid(),
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    content: '',
-  };
-  state.pages.unshift(page); // newest first
+function exportJSON() {
+  try {
+    const blob = new Blob([JSON.stringify(state.pages, null, 2)], { type: 'application/json' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `slate-${new Date().toISOString().split('T')[0]}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast('Notes exported', 'ok');
+  } catch (e) {
+    toast('Export failed', 'err');
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   UNDO
+═══════════════════════════════════════════════════════════ */
+function pushUndo() {
+  const snap = JSON.stringify(state.pages);
+  if (state.undoStack.length && state.undoStack[state.undoStack.length - 1] === snap) return;
+  state.undoStack.push(snap);
+  if (state.undoStack.length > UNDO_LIMIT) state.undoStack.shift();
+}
+
+function undo() {
+  if (state.undoStack.length < 2) return;
+  state.undoStack.pop(); // discard current
+  const prev = state.undoStack[state.undoStack.length - 1];
+  state.pages = JSON.parse(prev);
   saveData();
+  renderSpreads();
+  toast('Undo');
+}
+
+/* ═══════════════════════════════════════════════════════════
+   SYNC STATUS UI
+═══════════════════════════════════════════════════════════ */
+function setSyncStatus(status) {
+  const pill  = document.getElementById('sync-pill');
+  const label = pill.querySelector('.sync-text');
+  if (!state.online) {
+    pill.className = 'sync-pill offline';
+    label.textContent = 'Offline';
+    return;
+  }
+  pill.className = status === 'saving' ? 'sync-pill saving' : 'sync-pill';
+  label.textContent = status === 'saving' ? 'Saving…' : 'Saved';
+}
+
+/* ═══════════════════════════════════════════════════════════
+   TOAST
+═══════════════════════════════════════════════════════════ */
+function toast(msg, type = '') {
+  const c  = document.getElementById('toast-container');
+  const el = document.createElement('div');
+  el.className = `toast ${type}`.trim();
+  el.textContent = msg;
+  c.appendChild(el);
+  setTimeout(() => {
+    el.style.transition = 'opacity 300ms';
+    el.style.opacity = '0';
+    setTimeout(() => el.remove(), 300);
+  }, 2400);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   CONFIRM DIALOG
+═══════════════════════════════════════════════════════════ */
+function confirm(msg) {
+  return new Promise(resolve => {
+    const overlay = document.getElementById('confirm-overlay');
+    document.getElementById('confirm-msg').textContent = msg;
+    overlay.classList.remove('hidden');
+    const ok     = document.getElementById('confirm-ok');
+    const cancel = document.getElementById('confirm-cancel');
+    function cleanup(val) {
+      overlay.classList.add('hidden');
+      ok.removeEventListener('click', onOk);
+      cancel.removeEventListener('click', onCancel);
+      resolve(val);
+    }
+    function onOk()     { cleanup(true); }
+    function onCancel() { cleanup(false); }
+    ok.addEventListener('click', onOk);
+    cancel.addEventListener('click', onCancel);
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════
+   PAGE MANAGEMENT
+═══════════════════════════════════════════════════════════ */
+function createPage() {
+  const page = { id: uid(), date: new Date().toISOString(), elements: [] };
+  state.pages.push(page);
+  // Navigate to the new page spread
+  state.spreadIdx = Math.floor((state.pages.length - 1) / pagesPerSpread());
+  saveData();
+  pushUndo();
   return page;
 }
 
-function deletePage(id) {
-  const idx = state.pages.findIndex(p => p.id === id);
-  if (idx === -1) return;
-  state.pages.splice(idx, 1);
+async function deletePage(pageIdx) {
+  const ok = await confirm('Delete this page? This cannot be undone.');
+  if (!ok) return;
+  state.pages.splice(pageIdx, 1);
+  state.spreadIdx = clamp(state.spreadIdx, 0, Math.max(0, spreadCount() - 1));
   saveData();
+  pushUndo();
+  renderSpreads();
+  updateHeaderDate();
+  toast('Page deleted');
 }
 
-function updatePageContent(id, content) {
-  const page = state.pages.find(p => p.id === id);
-  if (!page) return;
-  page.content = content;
-  page.updatedAt = new Date().toISOString();
-  scheduleSave();
-  // Refresh sidebar list item title without full re-render
-  if (!IS_MOBILE) {
-    refreshListItemTitle(id);
-  } else {
-    refreshMobileListItemTitle(id);
+/* ═══════════════════════════════════════════════════════════
+   TEXT BLOCK RENDERING
+═══════════════════════════════════════════════════════════ */
+function buildTextBlock(elData, page, pageEl) {
+  const div = document.createElement('div');
+  div.className = 'text-block';
+  div.contentEditable = 'true';
+  div.spellcheck = true;
+  div.dataset.elId = elData.id;
+  div.style.left = `${elData.x}px`;
+  div.style.top  = `${elData.y}px`;
+  div.innerHTML  = elData.content || '';
+
+  if (!elData.content) {
+    div.setAttribute('data-placeholder', 'Start writing…');
   }
+
+  // Paste: plain text only
+  div.addEventListener('paste', e => {
+    e.preventDefault();
+    const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+    document.execCommand('insertText', false, text);
+  });
+
+  // Input: save content and trigger autosave. Update title live.
+  div.addEventListener('input', () => {
+    elData.content = div.innerHTML;
+    if (!elData.content.replace(/<[^>]+>/g, '').trim()) {
+      div.setAttribute('data-placeholder', 'Start writing…');
+    } else {
+      div.removeAttribute('data-placeholder');
+    }
+    triggerSave();
+    updateHeaderDate();
+  });
+
+  // Blur: remove empty blocks
+  div.addEventListener('blur', () => {
+    const txt = div.textContent.trim();
+    if (!txt) {
+      div.remove();
+      page.elements = page.elements.filter(e => e.id !== elData.id);
+      triggerSave();
+    }
+  });
+
+  // Prevent page click while editing
+  div.addEventListener('mousedown',  e => e.stopPropagation());
+  div.addEventListener('touchstart', e => e.stopPropagation(), { passive: true });
+
+  pageEl.appendChild(div);
+  return div;
 }
 
-// ─── Auth ────────────────────────────────────────────────────────────────────
-function decodeJwt(token) {
-  const base64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
-  return JSON.parse(decodeURIComponent(
-    atob(base64).split('').map(c => '%' + c.charCodeAt(0).toString(16).padStart(2, '0')).join('')
-  ));
+/* ═══════════════════════════════════════════════════════════
+   TEXT PLACEMENT LOGIC (shared by mouse + mobile tap)
+═══════════════════════════════════════════════════════════ */
+function placeText(clientX, clientY, pageEl) {
+  if (state.animating) return;
+  const pageIdx = parseInt(pageEl.dataset.pageIdx);
+  if (isNaN(pageIdx) || !state.pages[pageIdx]) return;
+  const page = state.pages[pageIdx];
+
+  const rect = pageEl.getBoundingClientRect();
+  let relX = clientX - rect.left;
+  let relY = clientY - rect.top;
+
+  // Y-snap to nearest ruled line
+  const snappedY = snapY(relY);
+
+  // Enforce left boundary (beyond margin)
+  const ml = marginLeft();
+  relX = clamp(relX, ml, rect.width - 24);
+
+  // Proximity: continue existing block
+  const existing = page.elements.find(el =>
+    Math.abs(el.y - snappedY) <= PROX_Y &&
+    relX >= el.x - PROX_X / 2 && relX <= el.x + PROX_X
+  );
+
+  if (existing) {
+    const domEl = pageEl.querySelector(`[data-el-id="${existing.id}"]`);
+    if (domEl) {
+      domEl.focus();
+      // Move caret to end
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(domEl);
+      range.collapse(false);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+    return;
+  }
+
+  // Collision check: don't layer over existing block at same Y
+  const collision = page.elements.some(el =>
+    Math.abs(el.y - snappedY) < LINE_H * 0.5 &&
+    relX >= el.x - 10 && relX <= el.x + 200
+  );
+  if (collision) return;
+
+  // Create new element
+  const elData = { id: uid(), x: relX, y: snappedY, content: '' };
+  page.elements.push(elData);
+  triggerSave();
+
+  const domEl = buildTextBlock(elData, page, pageEl);
+  requestAnimationFrame(() => {
+    domEl.focus();
+  });
 }
 
+/* ═══════════════════════════════════════════════════════════
+   PAGE DOM BUILDER
+═══════════════════════════════════════════════════════════ */
+function buildPage(pageIdx, position) {
+  // position: 'single' | 'left' | 'right'
+  const div = document.createElement('div');
+  div.className = `page ${position}`;
+
+  const isReal = pageIdx >= 0 && pageIdx < state.pages.length;
+
+  if (!isReal) {
+    // Ghost placeholder (e.g. odd page on desktop)
+    div.classList.add('ghost');
+    return div;
+  }
+
+  div.dataset.pageIdx = pageIdx;
+  const page = state.pages[pageIdx];
+
+  // Page date
+  const dateEl = document.createElement('div');
+  dateEl.className = 'page-date';
+  dateEl.textContent = formatDate(page.date);
+  div.appendChild(dateEl);
+
+  // Page number
+  const numEl = document.createElement('div');
+  numEl.className = 'page-num';
+  numEl.textContent = pageIdx + 1;
+  div.appendChild(numEl);
+
+  // Text blocks
+  page.elements.forEach(el => buildTextBlock(el, page, div));
+
+  // Click → place text (DESKTOP ONLY — mobile uses touchend)
+  if (!IS_MOBILE) {
+    div.addEventListener('click', e => {
+      if (e.target.classList.contains('text-block')) return;
+      placeText(e.clientX, e.clientY, div);
+    });
+  }
+
+  return div;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   SPREAD BUILDER
+═══════════════════════════════════════════════════════════ */
+function buildSpread(si) {
+  const div = document.createElement('div');
+  div.className = 'spread';
+  div.dataset.spreadIdx = si;
+
+  if (IS_MOBILE) {
+    div.appendChild(buildPage(si, 'single'));
+  } else {
+    const [li, ri] = [si * 2, si * 2 + 1];
+    div.appendChild(buildPage(li, 'left'));
+    div.appendChild(buildPage(ri, 'right'));
+  }
+
+  return div;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   SPREAD RENDERING & NAVIGATION
+═══════════════════════════════════════════════════════════ */
+let spreads = { prev: null, curr: null, next: null };
+
+function applyTransform(el, vw) {
+  if (el) el.style.transform = `translate3d(${vw}vw, 0, 0)`;
+}
+
+function setAnim(on) {
+  [spreads.prev, spreads.curr, spreads.next].forEach(s => {
+    if (!s) return;
+    if (on) s.classList.add('anim');
+    else    s.classList.remove('anim');
+  });
+}
+
+function renderSpreads() {
+  const track = document.getElementById('notebook-track');
+  track.innerHTML = '';
+  spreads = { prev: null, curr: null, next: null };
+
+  // Empty state — no pages at all
+  if (state.pages.length === 0) {
+    const emptyDiv = document.createElement('div');
+    emptyDiv.className = 'empty-notebook-state';
+    emptyDiv.innerHTML = `
+      <div class="empty-nb-inner">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+        <h2>Your notebook is empty</h2>
+        <p>Press <kbd>+</kbd> to create your first page, then click anywhere on the page to start writing.</p>
+      </div>
+    `;
+    track.appendChild(emptyDiv);
+    updateHeaderDate();
+    return;
+  }
+
+  const si = state.spreadIdx;
+  const sc = spreadCount();
+
+  spreads.curr = buildSpread(si);
+  applyTransform(spreads.curr, 0);
+  track.appendChild(spreads.curr);
+
+  if (si > 0) {
+    spreads.prev = buildSpread(si - 1);
+    applyTransform(spreads.prev, -100);
+    track.appendChild(spreads.prev);
+  }
+
+  if (si < sc - 1) {
+    spreads.next = buildSpread(si + 1);
+    applyTransform(spreads.next, 100);
+    track.appendChild(spreads.next);
+  }
+
+  updateHeaderDate();
+}
+
+function navigateTo(direction) {
+  // direction: -1 (prev) | +1 (next)
+  if (state.animating) return;
+  const sc = spreadCount();
+  const target = state.spreadIdx + direction;
+  if (target < 0 || target >= sc) return;
+
+  // Save current page content before navigating
+  clearTimeout(state.saveTimer);
+  pushUndo();
+  saveData();
+
+  setAnim(true);
+  state.animating = true;
+
+  if (direction === -1) {
+    applyTransform(spreads.prev,  0);
+    applyTransform(spreads.curr, 100);
+  } else {
+    applyTransform(spreads.curr, -100);
+    applyTransform(spreads.next,  0);
+  }
+
+  state.spreadIdx = target;
+  setTimeout(() => {
+    state.animating = false;
+    // Full re-render so prev/next are correctly pre-positioned
+    setAnim(false);
+    renderSpreads();
+  }, SPREAD_DUR);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   HEADER
+═══════════════════════════════════════════════════════════ */
+function updateHeaderDate() {
+  const label = document.getElementById('date-label');
+  if (!label) return;
+  if (state.view === 'gallery') { label.textContent = 'Gallery'; return; }
+  if (state.pages.length === 0) { label.textContent = 'Slate'; return; }
+
+  const indices = pageIndicesForSpread(state.spreadIdx);
+  const pageIdx = indices.find(i => i < state.pages.length);
+  if (pageIdx === undefined) { label.textContent = 'Slate'; return; }
+
+  const page = state.pages[pageIdx];
+  label.textContent = formatDate(page.date);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   GALLERY
+═══════════════════════════════════════════════════════════ */
+function openGallery() {
+  if (state.view === 'gallery') return;
+  state.view = 'gallery';
+
+  const nv = document.getElementById('notebook-view');
+  const gv = document.getElementById('gallery-view');
+
+  // Save pending
+  clearTimeout(state.saveTimer);
+  saveData();
+
+  nv.classList.add('zooming-out');
+
+  setTimeout(() => {
+    nv.classList.add('hidden');
+    nv.classList.remove('zooming-out');
+
+    renderGallery();
+
+    gv.classList.remove('hidden');
+    gv.classList.add('gallery-entering');
+    void gv.offsetWidth; // flush
+    gv.classList.remove('gallery-entering');
+
+    document.getElementById('gallery-btn').classList.add('hidden');
+    document.getElementById('back-btn').classList.remove('hidden');
+    updateHeaderDate();
+  }, 260);
+}
+
+function closeGallery(targetSpreadIdx) {
+  if (state.view !== 'gallery') return;
+  state.view = 'notebook';
+
+  if (targetSpreadIdx !== undefined) {
+    state.spreadIdx = targetSpreadIdx;
+  }
+
+  const gv = document.getElementById('gallery-view');
+  const nv = document.getElementById('notebook-view');
+
+  gv.classList.add('hidden');
+
+  renderSpreads();
+
+  nv.classList.remove('hidden');
+  nv.classList.add('zooming-in');
+  void nv.offsetWidth;
+  nv.classList.remove('zooming-in');
+
+  document.getElementById('gallery-btn').classList.remove('hidden');
+  document.getElementById('back-btn').classList.add('hidden');
+  updateHeaderDate();
+}
+
+function renderGallery() {
+  const scroller = document.getElementById('gallery-scroller');
+  const empty    = document.getElementById('gallery-empty');
+  scroller.innerHTML = '';
+
+  if (state.pages.length === 0) {
+    empty.classList.remove('hidden');
+    return;
+  }
+  empty.classList.add('hidden');
+
+  // Group by month (newest first within month, months also newest first)
+  const groups = {};
+  state.pages.forEach((page, idx) => {
+    const mk = monthKey(page.date);
+    if (!groups[mk]) groups[mk] = [];
+    groups[mk].push({ page, idx });
+  });
+
+  const sortedMonths = Object.keys(groups).sort((a, b) => {
+    return new Date(b) - new Date(a);
+  });
+
+  sortedMonths.forEach(month => {
+    const section = document.createElement('div');
+    section.className = 'gallery-month';
+    section.dataset.month = month;
+
+    const header = document.createElement('div');
+    header.className = 'month-header';
+    header.textContent = month;
+    section.appendChild(header);
+
+    const grid = document.createElement('div');
+    grid.className = 'gallery-grid';
+
+    const items = groups[month].sort((a, b) => new Date(b.page.date) - new Date(a.page.date));
+    items.forEach(({ page, idx }) => {
+      grid.appendChild(buildThumb(page, idx));
+    });
+
+    section.appendChild(grid);
+    scroller.appendChild(section);
+  });
+}
+
+function buildThumb(page, pageIdx) {
+  const div = document.createElement('div');
+  div.className = 'gallery-thumb';
+  div.setAttribute('role', 'button');
+  div.setAttribute('tabindex', '0');
+  div.setAttribute('aria-label', `Page ${pageIdx + 1}`);
+
+  // Snippet
+  const text = pageTextContent(page).substring(0, 80);
+  if (text) {
+    const preview = document.createElement('div');
+    preview.className = 'thumb-preview';
+    preview.textContent = text;
+    div.appendChild(preview);
+  }
+
+  const numEl = document.createElement('div');
+  numEl.className = 'thumb-page-num';
+  numEl.textContent = pageIdx + 1;
+  div.appendChild(numEl);
+
+  const si = Math.floor(pageIdx / pagesPerSpread());
+  div.addEventListener('click', () => closeGallery(si));
+  div.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); closeGallery(si); }
+  });
+
+  return div;
+}
+
+/* Scroll date indicator */
+function setupScrollIndicator() {
+  const scroller   = document.getElementById('gallery-scroller');
+  const indicator  = document.getElementById('scroll-date-indicator');
+  let hideTimer;
+
+  const onScroll = debounce(() => {
+    // Find which month header is nearest top
+    const headers = Array.from(document.querySelectorAll('.month-header'));
+    if (!headers.length) return;
+
+    let active = headers[0];
+    headers.forEach(h => {
+      if (h.getBoundingClientRect().top < 80) active = h;
+    });
+    indicator.textContent = active.textContent;
+
+    indicator.classList.add('visible');
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => {
+      indicator.classList.remove('visible');
+    }, 1200);
+  }, 30);
+
+  scroller.addEventListener('scroll', onScroll, { passive: true });
+}
+
+/* ═══════════════════════════════════════════════════════════
+   DESKTOP INTERACTIONS
+═══════════════════════════════════════════════════════════ */
+function initDesktop() {
+  // Keyboard navigation (DESKTOP ONLY)
+  document.addEventListener('keydown', e => {
+    // Skip if in a text block
+    if (document.activeElement && document.activeElement.isContentEditable) {
+      // Allow undo inside text blocks too
+      if (e.key === 'z' && (e.metaKey || e.ctrlKey)) {
+        // browser can handle text undo naturally; only intercept at app level
+        // when NOT in a text block
+      }
+      return;
+    }
+
+    if (state.view === 'gallery') {
+      if (e.key === 'Escape') { e.preventDefault(); closeGallery(); }
+      return;
+    }
+
+    switch (e.key) {
+      case 'ArrowRight': e.preventDefault(); navigateTo(1);  break;
+      case 'ArrowLeft':  e.preventDefault(); navigateTo(-1); break;
+      case 'ArrowDown':  e.preventDefault(); navigateTo(1);  break;
+      case 'ArrowUp':    e.preventDefault(); navigateTo(-1); break;
+      case 'Escape':     e.preventDefault(); document.activeElement?.blur(); break;
+    }
+
+    // Undo
+    if (e.key === 'z' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      undo();
+    }
+
+    // New page
+    if (e.key === 'n' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      newPage();
+    }
+  });
+
+  // Block trackpad horizontal swipe from triggering browser back/forward
+  // Also prevent it from hijacking page nav
+  const track = document.getElementById('notebook-track');
+  track.addEventListener('wheel', e => {
+    if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+      e.preventDefault(); // block horizontal scroll navigation
+    }
+  }, { passive: false });
+
+  // Block any mouse drag on the track (no drag navigation on desktop)
+  track.addEventListener('mousedown', e => {
+    // Only block if not clicking into a page
+    if (!e.target.closest('.page')) e.preventDefault();
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════
+   MOBILE TOUCH INTERACTIONS
+═══════════════════════════════════════════════════════════ */
+function initMobile() {
+  const track = document.getElementById('notebook-track');
+
+  let t = {
+    startX: 0, startY: 0, currX: 0,
+    startTime: 0,
+    isSwiping: false,
+    isPinching: false, pinchStart: 0,
+    rafId: null,
+  };
+
+  function getPinchDist(touches) {
+    const dx = touches[0].clientX - touches[1].clientX;
+    const dy = touches[0].clientY - touches[1].clientY;
+    return Math.hypot(dx, dy);
+  }
+
+  function onTouchStart(e) {
+    if (state.animating) return;
+
+    if (e.touches.length === 2) {
+      t.isPinching  = true;
+      t.pinchStart  = getPinchDist(e.touches);
+      t.isSwiping   = false;
+      return;
+    }
+
+    t.isPinching  = false;
+    t.isSwiping   = false;
+    t.startX      = e.touches[0].clientX;
+    t.startY      = e.touches[0].clientY;
+    t.currX       = t.startX;
+    t.startTime   = performance.now();
+
+    setAnim(false); // disable transitions during tracking
+  }
+
+  function onTouchMove(e) {
+    if (state.animating) { e.preventDefault(); return; }
+
+    // Pinch: check if spread shrunk enough to open gallery
+    if (t.isPinching && e.touches.length === 2 && state.view === 'notebook') {
+      e.preventDefault();
+      const dist = getPinchDist(e.touches);
+      if (t.pinchStart - dist > PINCH_THRESH) {
+        t.isPinching = false;
+        openGallery();
+      }
+      return;
+    }
+
+    // Don't steal events from editing text
+    if (e.target.isContentEditable) return;
+
+    const dx = e.touches[0].clientX - t.startX;
+    const dy = e.touches[0].clientY - t.startY;
+
+    // Determine swipe axis
+    if (!t.isSwiping) {
+      if (Math.abs(dx) > 8 && Math.abs(dx) > Math.abs(dy) * 1.2) {
+        t.isSwiping = true;
+        if (document.activeElement) document.activeElement.blur();
+      } else if (Math.abs(dy) > 8) {
+        return; // vertical scroll — don't interfere
+      }
+    }
+
+    if (!t.isSwiping) return;
+    e.preventDefault();
+
+    t.currX = e.touches[0].clientX;
+
+    // RAF-throttled transform update
+    if (t.rafId) return;
+    t.rafId = requestAnimationFrame(() => {
+      t.rafId = null;
+      let delta = t.currX - t.startX;
+      const sc = spreadCount();
+
+      // Rubber-band at edges
+      if (state.spreadIdx === 0       && delta > 0) delta *= 0.12;
+      if (state.spreadIdx >= sc - 1   && delta < 0) delta *= 0.12;
+
+      const pct = (delta / window.innerWidth) * 100;
+      applyTransform(spreads.curr, pct);
+      applyTransform(spreads.prev, pct - 100);
+      applyTransform(spreads.next, pct + 100);
+    });
+  }
+
+  function onTouchEnd(e) {
+    if (t.rafId) { cancelAnimationFrame(t.rafId); t.rafId = null; }
+    t.isPinching = false;
+
+    if (!t.isSwiping) {
+      // It's a tap — place text
+      if (e.changedTouches.length && state.view === 'notebook') {
+        const ct = e.changedTouches[0];
+        const dx = ct.clientX - t.startX;
+        const dy = ct.clientY - t.startY;
+        if (Math.abs(dx) < 10 && Math.abs(dy) < 10) {
+          // Confirmed tap
+          const el = document.elementFromPoint(ct.clientX, ct.clientY);
+          const pageEl = el && el.closest('.page[data-page-idx]');
+          if (pageEl && !el.isContentEditable) {
+            placeText(ct.clientX, ct.clientY, pageEl);
+          }
+        }
+      }
+      return;
+    }
+
+    t.isSwiping = false;
+
+    const dx       = t.currX - t.startX;
+    const elapsed  = performance.now() - t.startTime;
+    const velocity = Math.abs(dx) / elapsed;
+    const pct      = Math.abs(dx) / window.innerWidth;
+    const sc       = spreadCount();
+
+    let dir = 0;
+    if (velocity > SWIPE_VEL || pct > SWIPE_PCT) {
+      if (dx > 0 && state.spreadIdx > 0)      dir = -1;
+      if (dx < 0 && state.spreadIdx < sc - 1) dir =  1;
+    }
+
+    // Save on page change
+    if (dir !== 0) {
+      clearTimeout(state.saveTimer);
+      pushUndo();
+      saveData();
+    }
+
+    setAnim(true);
+    state.animating = true;
+
+    if (dir === -1) {
+      state.spreadIdx--;
+      applyTransform(spreads.prev,   0);
+      applyTransform(spreads.curr, 100);
+    } else if (dir === 1) {
+      state.spreadIdx++;
+      applyTransform(spreads.curr, -100);
+      applyTransform(spreads.next,    0);
+    } else {
+      // Snap back
+      applyTransform(spreads.curr,   0);
+      applyTransform(spreads.prev, -100);
+      applyTransform(spreads.next,  100);
+    }
+
+    setTimeout(() => {
+      state.animating = false;
+      setAnim(false);
+      if (dir !== 0) renderSpreads();
+    }, SPREAD_DUR);
+  }
+
+  track.addEventListener('touchstart', onTouchStart, { passive: true });
+  track.addEventListener('touchmove',  onTouchMove,  { passive: false });
+  track.addEventListener('touchend',   onTouchEnd,   { passive: true });
+}
+
+/* ═══════════════════════════════════════════════════════════
+   NEW PAGE
+═══════════════════════════════════════════════════════════ */
+function newPage() {
+  if (state.view === 'gallery') {
+    createPage();
+    closeGallery(Math.floor((state.pages.length - 1) / pagesPerSpread()));
+  } else {
+    createPage();
+    renderSpreads();
+  }
+  updateHeaderDate();
+  toast('New page created', 'ok');
+}
+
+/* ═══════════════════════════════════════════════════════════
+   AUTH
+═══════════════════════════════════════════════════════════ */
 window.handleCredentialResponse = function(response) {
   try {
-    const payload = decodeJwt(response.credential);
+    const b64 = response.credential.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const payload = JSON.parse(decodeURIComponent(
+      atob(b64).split('').map(c => '%' + c.charCodeAt(0).toString(16).padStart(2,'0')).join('')
+    ));
     state.user = { name: payload.name, email: payload.email, picture: payload.picture };
-    applyAuthState();
-    showToast(`Signed in as ${payload.given_name}`, 'success');
-  } catch(e) {
-    showToast('Sign-in failed', 'error');
+    applyAuthUI();
+    toast(`Signed in as ${payload.given_name || payload.name}`, 'ok');
+  } catch (e) {
+    toast('Sign-in failed', 'err');
   }
 };
 
-function applyAuthState() {
-  if (IS_MOBILE) {
-    applyMobileAuthState();
-  } else {
-    applyDesktopAuthState();
-  }
-}
+function applyAuthUI() {
+  const widget = document.getElementById('user-widget');
+  const avatar = document.getElementById('user-avatar');
+  const nameEl = document.getElementById('user-name-label');
+  const gsignin = document.querySelector('.g_id_signin');
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  DESKTOP
-// ─────────────────────────────────────────────────────────────────────────────
-
-function initDesktop() {
-  // Wire DOM
-  DOM.newPageBtn.addEventListener('click', () => newPageAndOpen());
-  DOM.emptyNewBtn.addEventListener('click', () => newPageAndOpen());
-  DOM.deletePageBtn.addEventListener('click', () => deleteActivePage());
-  DOM.logoutBtn.addEventListener('click', desktopLogout);
-  DOM.exportBtn.addEventListener('click', exportData);
-  DOM.confirmCancel.addEventListener('click', () => {}); // wired in showConfirm
-  DOM.confirmOk.addEventListener('click', () => {});
-
-  // Keyboard navigation
-  document.addEventListener('keydown', handleDesktopKeydown);
-
-  // Block wheel-based horizontal page switching (prevent accidental trackpad swipes)
-  DOM.pageContainer.addEventListener('wheel', (e) => {
-    if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) e.preventDefault();
-  }, { passive: false });
-
-  // Auth
-  applyDesktopAuthState();
-
-  // Render
-  renderDesktopPagesList();
-
-  // Open first page if any
-  if (state.pages.length > 0) {
-    openDesktopPage(state.pages[0].id);
-  } else {
-    showDesktopEmptyState();
-  }
-}
-
-function handleDesktopKeydown(e) {
-  // Ignore if typing in editor
-  if (document.activeElement === DOM.pageEditor) return;
-
-  const idx = state.pages.findIndex(p => p.id === state.activePageId);
-
-  if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
-    e.preventDefault();
-    if (idx < state.pages.length - 1) openDesktopPage(state.pages[idx + 1].id);
-  } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
-    e.preventDefault();
-    if (idx > 0) openDesktopPage(state.pages[idx - 1].id);
-  } else if ((e.key === 'n' || e.key === 'N') && (e.metaKey || e.ctrlKey)) {
-    e.preventDefault();
-    newPageAndOpen();
-  }
-}
-
-function newPageAndOpen() {
-  const page = createPage();
-  if (IS_MOBILE) {
-    renderMobilePagesList();
-    openMobileEditor(page.id);
-  } else {
-    renderDesktopPagesList();
-    openDesktopPage(page.id);
-    // Focus editor
-    setTimeout(() => DOM.pageEditor.focus(), 100);
-  }
-}
-
-function showDesktopEmptyState() {
-  DOM.emptyState.classList.remove('hidden');
-  DOM.editorToolbar.classList.add('hidden');
-  DOM.pageContainer.classList.add('hidden');
-  state.activePageId = null;
-}
-
-function openDesktopPage(id) {
-  const page = state.pages.find(p => p.id === id);
-  if (!page) return;
-
-  state.activePageId = id;
-
-  // Update UI
-  DOM.emptyState.classList.add('hidden');
-  DOM.editorToolbar.classList.remove('hidden');
-  DOM.pageContainer.classList.remove('hidden');
-
-  // Set content
-  DOM.pageEditor.innerHTML = page.content || '';
-  DOM.currentPageLabel.textContent = formatDate(page.updatedAt);
-
-  // Highlight active in sidebar
-  document.querySelectorAll('.page-list-item').forEach(el => {
-    el.classList.toggle('active', el.dataset.id === id);
-  });
-}
-
-function renderDesktopPagesList() {
-  DOM.pagesList.innerHTML = '';
-  if (state.pages.length === 0) {
-    showDesktopEmptyState();
-    return;
-  }
-  state.pages.forEach(page => {
-    const el = createDesktopListItem(page);
-    DOM.pagesList.appendChild(el);
-  });
-}
-
-function createDesktopListItem(page) {
-  const el = document.createElement('div');
-  el.className = 'page-list-item';
-  el.dataset.id = page.id;
-  if (page.id === state.activePageId) el.classList.add('active');
-
-  el.innerHTML = `
-    <div class="page-item-icon">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-    </div>
-    <div class="page-item-info">
-      <div class="page-item-title">${escHtml(pageTitle(page))}</div>
-      <div class="page-item-meta">${formatDate(page.updatedAt)}</div>
-    </div>
-  `;
-  el.addEventListener('click', () => openDesktopPage(page.id));
-  return el;
-}
-
-function refreshListItemTitle(id) {
-  const page = state.pages.find(p => p.id === id);
-  if (!page) return;
-  const el = DOM.pagesList.querySelector(`[data-id="${id}"]`);
-  if (!el) return;
-  const titleEl = el.querySelector('.page-item-title');
-  const metaEl = el.querySelector('.page-item-meta');
-  if (titleEl) titleEl.textContent = pageTitle(page);
-  if (metaEl) metaEl.textContent = formatDate(page.updatedAt);
-}
-
-async function deleteActivePage() {
-  if (!state.activePageId) return;
-  const confirmed = await showConfirm('Delete this page? This cannot be undone.');
-  if (!confirmed) return;
-
-  const id = state.activePageId;
-  const idx = state.pages.findIndex(p => p.id === id);
-
-  deletePage(id);
-
-  // Decide what to open next
-  const remaining = state.pages;
-  if (remaining.length === 0) {
-    renderDesktopPagesList();
-    showDesktopEmptyState();
-  } else {
-    const nextIdx = Math.min(idx, remaining.length - 1);
-    renderDesktopPagesList();
-    openDesktopPage(remaining[nextIdx].id);
-  }
-  showToast('Page deleted');
-}
-
-function applyDesktopAuthState() {
   if (state.user) {
-    DOM.signinArea.classList.add('hidden');
-    DOM.userProfile.classList.remove('hidden');
-    DOM.userAvatar.src = state.user.picture || '';
-    DOM.userName.textContent = state.user.name;
+    avatar.src = state.user.picture || '';
+    avatar.alt = state.user.name;
+    nameEl.textContent = state.user.name;
+    widget.classList.remove('hidden');
+    if (gsignin) gsignin.classList.add('hidden');
   } else {
-    DOM.signinArea.classList.remove('hidden');
-    DOM.userProfile.classList.add('hidden');
+    widget.classList.add('hidden');
+    if (gsignin) gsignin.classList.remove('hidden');
   }
 }
 
-function desktopLogout() {
-  state.user = null;
-  applyDesktopAuthState();
-  showToast('Signed out');
-}
+function setupAuthEvents() {
+  const avatar  = document.getElementById('user-avatar');
+  const menu    = document.getElementById('user-menu');
+  const logout  = document.getElementById('logout-btn');
+  const exportB = document.getElementById('export-btn');
 
-// Editor input handler (desktop)
-const debouncedDesktopInput = debounce(() => {
-  if (!state.activePageId) return;
-  updatePageContent(state.activePageId, DOM.pageEditor.innerHTML);
-}, 300);
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  MOBILE
-// ─────────────────────────────────────────────────────────────────────────────
-
-function initMobile() {
-  // Nav buttons
-  DOM.mPagesBtn.addEventListener('click', () => showMobilePanel('pages'));
-  DOM.mNewBtn.addEventListener('click', () => {
-    newPageAndOpen();
-    showMobilePanel('editor');
+  avatar.addEventListener('click', () => {
+    const open = menu.classList.toggle('hidden');
+    avatar.setAttribute('aria-expanded', !open ? 'true' : 'false');
   });
-  DOM.mAuthBtn.addEventListener('click', () => showMobilePanel('auth'));
 
-  DOM.mBackBtn.addEventListener('click', () => {
-    // Save content before leaving
-    if (state.activePageId) {
-      const content = DOM.mobilePageEditor.innerHTML;
-      updatePageContent(state.activePageId, content);
-      clearTimeout(state.saveTimer);
-      saveData();
+  // Close menu when clicking outside
+  document.addEventListener('click', e => {
+    if (!e.target.closest('#user-widget')) {
+      menu.classList.add('hidden');
+      avatar.setAttribute('aria-expanded', 'false');
     }
-    showMobilePanel('pages');
-    renderMobilePagesList();
   });
 
-  DOM.mDeleteBtn.addEventListener('click', () => deleteMobilePage());
-  DOM.mExportBtn.addEventListener('click', exportData);
-  DOM.mLogoutBtn.addEventListener('click', mobileLogout);
-
-  applyMobileAuthState();
-  renderMobilePagesList();
-}
-
-function showMobilePanel(panel) {
-  // panel: 'pages' | 'editor' | 'auth'
-  const panels = {
-    pages: DOM.mobilePagesPanel,
-    editor: DOM.mobileEditorPanel,
-    auth: DOM.mobileAuthPanel,
-  };
-
-  Object.entries(panels).forEach(([key, el]) => {
-    el.classList.toggle('active-panel', key === panel);
+  logout.addEventListener('click', () => {
+    state.user = null;
+    applyAuthUI();
+    menu.classList.add('hidden');
+    toast('Signed out');
   });
 
-  // Nav button active states
-  DOM.mPagesBtn.classList.toggle('active', panel === 'pages');
-  DOM.mNewBtn.classList.remove('active');
-  DOM.mAuthBtn.classList.toggle('active', panel === 'auth');
-}
-
-function renderMobilePagesList() {
-  DOM.mobilePagesListEl.innerHTML = '';
-  if (state.pages.length === 0) {
-    DOM.mobileEmptyState.classList.add('visible');
-    return;
-  }
-  DOM.mobileEmptyState.classList.remove('visible');
-
-  state.pages.forEach(page => {
-    const el = createMobileListItem(page);
-    DOM.mobilePagesListEl.appendChild(el);
+  exportB.addEventListener('click', () => {
+    exportJSON();
+    menu.classList.add('hidden');
   });
 }
 
-function createMobileListItem(page) {
-  const el = document.createElement('div');
-  el.className = 'm-page-item';
-  el.dataset.id = page.id;
-  el.innerHTML = `
-    <div class="m-page-icon">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-    </div>
-    <div class="m-page-info">
-      <div class="m-page-title">${escHtml(pageTitle(page))}</div>
-      <div class="m-page-meta">${formatDate(page.updatedAt)}</div>
-    </div>
-    <div class="m-page-chevron">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
-    </div>
-  `;
-  el.addEventListener('click', () => {
-    openMobileEditor(page.id);
-    showMobilePanel('editor');
-  });
-  return el;
-}
-
-function refreshMobileListItemTitle(id) {
-  const page = state.pages.find(p => p.id === id);
-  if (!page) return;
-  const el = DOM.mobilePagesListEl.querySelector(`[data-id="${id}"]`);
-  if (!el) return;
-  const titleEl = el.querySelector('.m-page-title');
-  if (titleEl) titleEl.textContent = pageTitle(page);
-}
-
-function openMobileEditor(id) {
-  const page = state.pages.find(p => p.id === id);
-  if (!page) return;
-  state.activePageId = id;
-  DOM.mobilePageEditor.innerHTML = page.content || '';
-  DOM.mPageLabel.textContent = pageTitle(page);
-}
-
-async function deleteMobilePage() {
-  if (!state.activePageId) return;
-  const confirmed = await showConfirm('Delete this page? This cannot be undone.');
-  if (!confirmed) return;
-
-  deletePage(state.activePageId);
-  state.activePageId = null;
-  DOM.mobilePageEditor.innerHTML = '';
-  renderMobilePagesList();
-  showMobilePanel('pages');
-  showToast('Page deleted');
-}
-
-function applyMobileAuthState() {
-  if (state.user) {
-    // Update avatar in nav
-    DOM.mAuthIcon.style.display = 'none';
-    DOM.mAvatar.style.display = 'block';
-    DOM.mAvatar.src = state.user.picture || '';
-    DOM.mAuthLabel.textContent = state.user.name.split(' ')[0];
-
-    // Auth panel
-    DOM.mSigninState.classList.add('hidden');
-    DOM.mLoggedinState.classList.remove('hidden');
-    DOM.mProfileAvatar.src = state.user.picture || '';
-    DOM.mProfileName.textContent = state.user.name;
-    DOM.mProfileEmail.textContent = state.user.email;
-  } else {
-    DOM.mAuthIcon.style.display = '';
-    DOM.mAvatar.style.display = 'none';
-    DOM.mAuthLabel.textContent = 'Sign In';
-    DOM.mSigninState.classList.remove('hidden');
-    DOM.mLoggedinState.classList.add('hidden');
-  }
-}
-
-function mobileLogout() {
-  state.user = null;
-  applyMobileAuthState();
-  showToast('Signed out');
-}
-
-// Mobile editor input handler
-const debouncedMobileInput = debounce(() => {
-  if (!state.activePageId) return;
-  updatePageContent(state.activePageId, DOM.mobilePageEditor.innerHTML);
-}, 300);
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-function escHtml(str) {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-// ─── Offline Handling ────────────────────────────────────────────────────────
-function setupOfflineHandling() {
+/* ═══════════════════════════════════════════════════════════
+   OFFLINE
+═══════════════════════════════════════════════════════════ */
+function setupOffline() {
   window.addEventListener('offline', () => {
-    state.isOnline = false;
+    state.online = false;
     setSyncStatus('offline');
-    showToast('You\'re offline — changes saved locally');
+    toast('You\'re offline — writing continues locally');
   });
   window.addEventListener('online', () => {
-    state.isOnline = true;
+    state.online = true;
     setSyncStatus('saved');
-    showToast('Back online', 'success');
+    toast('Back online', 'ok');
   });
 }
 
-// ─── Service Worker ──────────────────────────────────────────────────────────
-function registerServiceWorker() {
+/* ═══════════════════════════════════════════════════════════
+   SERVICE WORKER
+═══════════════════════════════════════════════════════════ */
+function registerSW() {
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js').catch(e => {
-      // SW optional, fail silently
-    });
+    navigator.serviceWorker.register('/sw.js').catch(() => {/* non-fatal */});
   }
 }
 
-// ─── Init ────────────────────────────────────────────────────────────────────
+/* ═══════════════════════════════════════════════════════════
+   TOP-LEVEL BUTTON WIRING
+═══════════════════════════════════════════════════════════ */
+function setupGlobalButtons() {
+  document.getElementById('new-page-btn').addEventListener('click', newPage);
+  document.getElementById('gallery-btn').addEventListener('click', openGallery);
+  document.getElementById('back-btn').addEventListener('click', () => closeGallery());
+}
+
+/* ═══════════════════════════════════════════════════════════
+   BOOT
+═══════════════════════════════════════════════════════════ */
 function init() {
-  // Populate DOM refs
-  DOM = {
-    // Shared
-    toastContainer: document.getElementById('toast-container'),
-    confirmOverlay: document.getElementById('confirm-overlay'),
-    confirmMessage: document.getElementById('confirm-message'),
-    confirmOk: document.getElementById('confirm-ok'),
-    confirmCancel: document.getElementById('confirm-cancel'),
-    appLoader: document.getElementById('app-loader'),
-
-    // Desktop
-    sidebar: document.getElementById('sidebar'),
-    sidebarStatus: document.getElementById('sidebar-status'),
-    newPageBtn: document.getElementById('new-page-btn'),
-    pagesList: document.getElementById('pages-list'),
-    signinArea: document.getElementById('signin-area'),
-    userProfile: document.getElementById('user-profile'),
-    userAvatar: document.getElementById('user-avatar'),
-    userName: document.getElementById('user-name'),
-    logoutBtn: document.getElementById('logout-btn'),
-    exportBtn: document.getElementById('export-btn'),
-    editorArea: document.getElementById('editor-area'),
-    emptyState: document.getElementById('empty-state'),
-    emptyNewBtn: document.getElementById('empty-new-btn'),
-    editorToolbar: document.getElementById('editor-toolbar'),
-    toolbarStatus: document.getElementById('toolbar-status'),
-    currentPageLabel: document.getElementById('current-page-label'),
-    deletePageBtn: document.getElementById('delete-page-btn'),
-    pageContainer: document.getElementById('page-container'),
-    pageEditor: document.getElementById('page-editor'),
-
-    // Mobile
-    mobileNav: document.getElementById('mobile-nav'),
-    mPagesBtn: document.getElementById('m-pages-btn'),
-    mNewBtn: document.getElementById('m-new-btn'),
-    mAuthBtn: document.getElementById('m-auth-btn'),
-    mAuthIcon: document.getElementById('m-auth-icon'),
-    mAvatar: document.getElementById('m-avatar'),
-    mAuthLabel: document.getElementById('m-auth-label'),
-    mStatus: document.getElementById('m-status'),
-    mobilePagesPanel: document.getElementById('mobile-pages-panel'),
-    mobilePagesListEl: document.getElementById('mobile-pages-list'),
-    mobileEmptyState: document.getElementById('mobile-empty-state'),
-    mobileEditorPanel: document.getElementById('mobile-editor-panel'),
-    mobileAuthPanel: document.getElementById('mobile-auth-panel'),
-    mBackBtn: document.getElementById('m-back-btn'),
-    mPageLabel: document.getElementById('m-page-label'),
-    mDeleteBtn: document.getElementById('m-delete-btn'),
-    mobilePageContainer: document.getElementById('mobile-page-container'),
-    mobilePageEditor: document.getElementById('mobile-page-editor'),
-    mSigninState: document.getElementById('m-signin-state'),
-    mLoggedinState: document.getElementById('m-loggedin-state'),
-    mProfileAvatar: document.getElementById('m-profile-avatar'),
-    mProfileName: document.getElementById('m-profile-name'),
-    mProfileEmail: document.getElementById('m-profile-email'),
-    mExportBtn: document.getElementById('m-export-btn'),
-    mLogoutBtn: document.getElementById('m-logout-btn'),
-  };
-
-  // Load persisted data
   loadData();
-  setupOfflineHandling();
-  registerServiceWorker();
+  pushUndo(); // seed undo stack with initial state
 
-  // Branch to device mode
+  // Set initial sync status
+  setSyncStatus(navigator.onLine ? 'saved' : 'offline');
+
+  // Render initial spreads (ensure at least conceptually a spread 0 exists)
+  state.spreadIdx = clamp(state.spreadIdx, 0, Math.max(0, spreadCount() - 1));
+  renderSpreads();
+  updateHeaderDate();
+
+  // Wire up interactions — strictly separated by device
   if (IS_MOBILE) {
     initMobile();
   } else {
     initDesktop();
   }
 
-  // Wire editor input events
-  if (DOM.pageEditor) {
-    DOM.pageEditor.addEventListener('input', debouncedDesktopInput);
-    DOM.pageEditor.addEventListener('paste', (e) => {
-      e.preventDefault();
-      const text = e.clipboardData.getData('text/plain');
-      document.execCommand('insertText', false, text);
-    });
-  }
+  // Shared setup
+  setupGlobalButtons();
+  setupAuthEvents();
+  setupOffline();
+  setupScrollIndicator();
+  registerSW();
+  applyAuthUI();
 
-  if (DOM.mobilePageEditor) {
-    DOM.mobilePageEditor.addEventListener('input', debouncedMobileInput);
-    DOM.mobilePageEditor.addEventListener('paste', (e) => {
-      e.preventDefault();
-      const text = e.clipboardData.getData('text/plain');
-      document.execCommand('insertText', false, text);
-    });
-  }
-
-  // Initial sync status
-  setSyncStatus(navigator.onLine ? 'saved' : 'offline');
-
-  // Remove loader
+  // Dismiss loader
   setTimeout(() => {
-    DOM.appLoader.classList.add('hidden');
-  }, 350);
+    document.getElementById('app-loader').classList.add('out');
+  }, 300);
 }
 
 document.addEventListener('DOMContentLoaded', init);
