@@ -3,84 +3,218 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <title>Premium Notebook</title>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <meta name="theme-color" content="#ffffff">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Slate">
+  <meta name="description" content="Slate — A simple, beautiful notebook.">
+  <title>Slate</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="icon" type="image/png" href="icons/icon-192.png">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <!-- Top Bar / Auth & Navigation -->
-  <header id="top-bar">
-    <div class="header-left">
-      <button id="gallery-btn" class="icon-button" title="Open Gallery (Pinch out)">
-        <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" stroke-width="2" fill="none"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect></svg>
-      </button>
-      <button id="notebook-btn" class="icon-button hidden" title="Back to Notebook">
-        <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" stroke-width="2" fill="none"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
-      </button>
-    </div>
-    
-    <div class="header-center" id="date-title"></div>
 
-    <!-- Sync UI -->
-    <div id="sync-status" class="hidden" aria-live="polite">
-      <span class="sync-icon"></span>
-      <span class="sync-text">Saved</span>
-    </div>
+  <!-- Loading Screen -->
+  <div id="app-loader">
+    <div class="loader-logo">Slate</div>
+  </div>
 
-    <!-- Google Identity Services Container -->
-    <div id="auth-container">
-      <div id="g_id_onload"
-         data-client_id="YOUR_GOOGLE_CLIENT_ID"
-         data-context="signin"
-         data-ux_mode="popup"
-         data-callback="handleCredentialResponse"
-         data-auto_prompt="false">
+  <!-- MOBILE NAV BAR (bottom) -->
+  <nav id="mobile-nav">
+    <button id="m-pages-btn" class="m-nav-btn active" aria-label="Pages">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+      <span>Pages</span>
+    </button>
+    <button id="m-new-btn" class="m-nav-btn" aria-label="New Page">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+      <span>New</span>
+    </button>
+    <button id="m-auth-btn" class="m-nav-btn" aria-label="Account">
+      <svg id="m-auth-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+      <img id="m-avatar" src="" alt="" style="display:none">
+      <span id="m-auth-label">Sign In</span>
+    </button>
+  </nav>
+
+  <!-- APP SHELL -->
+  <div id="app">
+
+    <!-- ===== DESKTOP SIDEBAR ===== -->
+    <aside id="sidebar">
+      <div id="sidebar-header">
+        <div class="app-wordmark">Slate</div>
+        <div id="sidebar-status" class="status-pill" aria-live="polite"></div>
       </div>
-      <div class="g_id_signin" data-type="standard" data-shape="pill" data-theme="filled_black" data-text="signin" data-size="medium" data-logo_alignment="left"></div>
-      
-      <!-- Profile UI when Authenticated -->
-      <div id="user-profile" class="hidden">
-        <img id="user-avatar" src="" alt="Profile" tabindex="0">
-        <div id="user-menu" class="hidden">
-           <button id="export-btn" class="menu-btn">Export JSON</button>
-           <button id="logout-btn" class="menu-btn danger">Log out</button>
+
+      <button id="new-page-btn" class="new-page-btn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        New Page
+      </button>
+
+      <div id="pages-list"></div>
+
+      <div id="sidebar-footer">
+        <!-- Google Sign-In Button (desktop) -->
+        <div id="g_id_onload"
+             data-client_id="YOUR_GOOGLE_CLIENT_ID"
+             data-context="signin"
+             data-ux_mode="popup"
+             data-callback="handleCredentialResponse"
+             data-auto_prompt="false">
+        </div>
+        <div id="signin-area">
+          <div class="g_id_signin"
+               data-type="standard"
+               data-shape="rectangular"
+               data-theme="outline"
+               data-text="signin_with"
+               data-size="medium"
+               data-logo_alignment="left">
+          </div>
+        </div>
+        <div id="user-profile" class="hidden">
+          <img id="user-avatar" src="" alt="Profile">
+          <div id="user-info">
+            <span id="user-name"></span>
+            <button id="logout-btn">Sign out</button>
+          </div>
+          <button id="export-btn" title="Export all notes as JSON">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          </button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ===== MAIN EDITOR AREA ===== -->
+    <main id="editor-area">
+
+      <!-- Empty state (no pages) -->
+      <div id="empty-state">
+        <div class="empty-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        </div>
+        <h2>Your notebook is empty</h2>
+        <p>Create your first page to start writing.</p>
+        <button class="empty-new-btn" id="empty-new-btn">Create first page</button>
+      </div>
+
+      <!-- Desktop editor toolbar -->
+      <div id="editor-toolbar" class="hidden">
+        <div id="page-title-area">
+          <span id="current-page-label"></span>
+        </div>
+        <div id="toolbar-right">
+          <div id="toolbar-status" class="status-pill" aria-live="polite"></div>
+          <button id="delete-page-btn" title="Delete this page">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- The actual page/editor -->
+      <div id="page-container" class="hidden">
+        <div id="notebook-page">
+          <div id="page-editor" contenteditable="true" spellcheck="true" aria-label="Page content" data-placeholder="Start writing..."></div>
+        </div>
+      </div>
+
+    </main>
+
+    <!-- ===== MOBILE VIEWS ===== -->
+
+    <!-- Mobile: Pages List Panel -->
+    <div id="mobile-pages-panel" class="mobile-panel active-panel">
+      <div class="mobile-panel-header">
+        <div class="app-wordmark">Slate</div>
+        <div id="m-status" class="status-pill" aria-live="polite"></div>
+      </div>
+      <div id="mobile-pages-list"></div>
+      <div id="mobile-empty-state">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        <p>No pages yet.<br>Tap <strong>New</strong> to begin.</p>
+      </div>
+    </div>
+
+    <!-- Mobile: Editor Panel -->
+    <div id="mobile-editor-panel" class="mobile-panel">
+      <div class="mobile-editor-topbar">
+        <button id="m-back-btn" aria-label="Back to pages">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <span id="m-page-label"></span>
+        <button id="m-delete-btn" aria-label="Delete page">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+        </button>
+      </div>
+      <div id="mobile-page-container">
+        <div id="mobile-notebook-page">
+          <div id="mobile-page-editor" contenteditable="true" spellcheck="true" aria-label="Page content" data-placeholder="Start writing..."></div>
         </div>
       </div>
     </div>
-  </header>
 
-  <div id="app">
-    <!-- Main Notebook View -->
-    <main id="notebook-view" class="view-active">
-      <div id="notebook-container">
-        <!-- Spreads / Pages injected via script.js -->
+    <!-- Mobile: Auth Panel -->
+    <div id="mobile-auth-panel" class="mobile-panel">
+      <div class="mobile-panel-header">
+        <div class="app-wordmark">Account</div>
       </div>
-    </main>
+      <div id="mobile-auth-content">
+        <div id="m-signin-state">
+          <div class="m-auth-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+          </div>
+          <h3>Sign in to sync your notes</h3>
+          <p>Your notes are saved locally. Sign in with Google to sync across devices.</p>
+          <div id="m_g_id_onload"
+               data-client_id="YOUR_GOOGLE_CLIENT_ID"
+               data-context="signin"
+               data-ux_mode="popup"
+               data-callback="handleCredentialResponse"
+               data-auto_prompt="false">
+          </div>
+          <div class="g_id_signin"
+               data-type="standard"
+               data-shape="rectangular"
+               data-theme="filled_blue"
+               data-text="signin_with"
+               data-size="large"
+               data-logo_alignment="left"
+               data-width="280">
+          </div>
+        </div>
+        <div id="m-loggedin-state" class="hidden">
+          <img id="m-profile-avatar" src="" alt="">
+          <h3 id="m-profile-name"></h3>
+          <p id="m-profile-email"></p>
+          <button id="m-export-btn" class="m-action-btn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Export all notes
+          </button>
+          <button id="m-logout-btn" class="m-action-btn m-danger-btn">Sign out</button>
+        </div>
+      </div>
+    </div>
 
-    <!-- Gallery View -->
-    <main id="gallery-view" class="hidden">
-      <div id="scroll-indicator" class="hidden">March 2026</div>
-      <div id="gallery-scroller">
-        <!-- Month headers & grids injected via script.js -->
-      </div>
-      
-      <!-- Empty State -->
-      <div id="gallery-empty" class="hidden">
-        <svg viewBox="0 0 24 24" width="48" height="48" stroke="currentColor" stroke-width="1.5" fill="none"><path d="M12 20h9M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
-        <h3>No Pages Yet</h3>
-        <p>Start writing to create your first entry.</p>
-        <button id="new-page-btn" class="primary-btn">New Page</button>
-      </div>
-    </main>
   </div>
-  
-  <!-- App Status Overlays -->
-  <div id="toast-container"></div>
-  <div id="app-loading">
-    <div class="spinner"></div>
+
+  <!-- Toast container -->
+  <div id="toast-container" aria-live="assertive"></div>
+
+  <!-- Confirm dialog -->
+  <div id="confirm-overlay" class="hidden">
+    <div id="confirm-dialog">
+      <p id="confirm-message">Are you sure?</p>
+      <div class="confirm-actions">
+        <button id="confirm-cancel">Cancel</button>
+        <button id="confirm-ok" class="confirm-danger">Delete</button>
+      </div>
+    </div>
   </div>
-  
+
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <script src="main.js" type="module"></script>
+  <script src="app.js"></script>
 </body>
 </html>
