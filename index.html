@@ -8,11 +8,58 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <div id="app">
-    <div id="notebook-container">
-      <!-- Pages injected via script.js -->
+  <!-- Top Bar / Auth & Navigation -->
+  <header id="top-bar">
+    <div class="header-left">
+      <button id="gallery-btn" class="icon-button" title="Open Gallery (Pinch out)">
+        <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" stroke-width="2" fill="none"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect></svg>
+      </button>
+      <button id="notebook-btn" class="icon-button hidden" title="Back to Notebook">
+        <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" stroke-width="2" fill="none"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+      </button>
     </div>
+    
+    <div class="header-center" id="date-title"></div>
+
+    <!-- Google Identity Services Container -->
+    <div id="auth-container">
+      <div id="g_id_onload"
+         data-client_id="YOUR_GOOGLE_CLIENT_ID"
+         data-context="signin"
+         data-ux_mode="popup"
+         data-callback="handleCredentialResponse"
+         data-auto_prompt="false">
+      </div>
+      <div class="g_id_signin" data-type="standard" data-shape="pill" data-theme="filled_black" data-text="signin" data-size="medium" data-logo_alignment="left"></div>
+      
+      <!-- Profile UI when Authenticated -->
+      <div id="user-profile" class="hidden">
+        <img id="user-avatar" src="" alt="Profile" tabindex="0">
+        <div id="user-menu" class="hidden">
+           <button id="logout-btn">Log out</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <div id="app">
+    <!-- Main Notebook View -->
+    <main id="notebook-view" class="view-active">
+      <div id="notebook-container">
+        <!-- Spreads / Pages injected via script.js -->
+      </div>
+    </main>
+
+    <!-- Gallery View -->
+    <main id="gallery-view" class="hidden">
+      <div id="scroll-indicator" class="hidden">March 2026</div>
+      <div id="gallery-scroller">
+        <!-- Month headers & grids injected via script.js -->
+      </div>
+    </main>
   </div>
+  
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
   <script src="script.js"></script>
 </body>
 </html>
