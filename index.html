@@ -14,6 +14,8 @@
   <link rel="apple-touch-icon" href="icons/icon-192.png">
   <link rel="icon" href="icons/icon-192.png" type="image/png">
   <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
 </head>
 <body>
 
@@ -73,6 +75,35 @@
 
   <!-- App Root -->
   <div id="app">
+
+    <!-- Slate Toolbar -->
+    <div id="slate-toolbar" role="toolbar" aria-label="Slate tools">
+      <div class="tb-section tb-modes">
+        <button id="tb-mode-text" class="tb-btn active" title="Text mode" aria-label="Text mode">T</button>
+        <button id="tb-mode-checklist" class="tb-btn" title="Checklist mode" aria-label="Checklist mode">✓</button>
+        <button id="tb-mode-draw" class="tb-btn" title="Draw mode" aria-label="Draw mode">✏</button>
+      </div>
+      <div class="tb-divider"></div>
+      <div class="tb-section">
+        <button id="zoom-in"  class="tb-btn" title="Zoom in"  aria-label="Zoom in">+</button>
+        <button id="zoom-out" class="tb-btn" title="Zoom out" aria-label="Zoom out">−</button>
+      </div>
+      <div class="tb-divider"></div>
+      <div class="tb-section" id="tb-format">
+        <select id="tb-font" class="tb-select" title="Font" aria-label="Font">
+          <option value="serif">Sf</option>
+          <option value="roboto">Rb</option>
+        </select>
+        <button id="tb-italic"    class="tb-btn" title="Italic"     aria-label="Italic"><em>I</em></button>
+        <button id="tb-underline" class="tb-btn" title="Underline"  aria-label="Underline"><u>U</u></button>
+        <input type="color" id="tb-color" value="#1a1a1a" class="tb-color-input" title="Text color" aria-label="Text color">
+        <input type="text"  id="tb-color-hex" value="#1a1a1a" class="tb-color-hex" maxlength="7" placeholder="#hex" aria-label="Hex color">
+      </div>
+      <div class="tb-section hidden" id="tb-draw-controls">
+        <input type="color" id="tb-draw-color" value="#1a1a1a" class="tb-color-input" title="Pen color" aria-label="Pen color">
+        <input type="range" id="tb-draw-width" min="1" max="12" value="2" class="tb-range" title="Pen size" aria-label="Pen size">
+      </div>
+    </div>
 
     <!-- Notebook View -->
     <div id="notebook-view">

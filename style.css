@@ -241,15 +241,15 @@ button:focus-visible,
   overflow: hidden;
   cursor: crosshair;
   touch-action: none;
-  /* Ruled lines */
+  /* Ruled lines — tile size driven by --line-h for zoom support */
   background-image:
     linear-gradient(var(--c-margin) 0, var(--c-margin) 100%),
     repeating-linear-gradient(
       to bottom,
       transparent,
-      transparent 31px,
-      var(--c-line) 31px,
-      var(--c-line) 32px
+      transparent calc(var(--line-h) - 1px),
+      var(--c-line) calc(var(--line-h) - 1px),
+      var(--c-line) var(--line-h)
     );
   background-repeat: no-repeat, repeat-y;
 }
@@ -382,6 +382,17 @@ button:focus-visible,
 }
 
 .text-block:focus {
+  background: rgba(37,99,235,.04);
+  border-radius: 3px;
+}
+
+.text-block[contenteditable="false"] {
+  cursor: text;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.text-block.active-block {
   background: rgba(37,99,235,.04);
   border-radius: 3px;
 }
@@ -651,3 +662,150 @@ button:focus-visible,
 
 /* ── Utility ───────────────────────────────────────────── */
 .hidden { display: none !important; }
+
+/* ── Slate Toolbar ─────────────────────────────────────── */
+#slate-toolbar {
+  position: fixed;
+  left: 12px;
+  top: calc(var(--topbar-h) + 10px);
+  z-index: 300;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: rgba(255,255,255,0.88);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--c-border);
+  border-radius: 12px;
+  padding: 8px 6px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.10), 0 1px 4px rgba(0,0,0,0.05);
+  width: 44px;
+  user-select: none;
+}
+
+.tb-section {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.tb-divider {
+  width: 28px;
+  height: 1px;
+  background: var(--c-border-soft);
+  margin: 2px auto;
+}
+
+.tb-btn {
+  width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 7px;
+  font-size: 13px; font-weight: 600;
+  color: var(--c-text-2);
+  transition: background 150ms, color 150ms;
+  cursor: pointer;
+  border: none;
+  background: none;
+  flex-shrink: 0;
+}
+.tb-btn:hover  { background: rgba(0,0,0,0.07); color: var(--c-text); }
+.tb-btn:active { background: rgba(0,0,0,0.12); }
+.tb-btn.active { background: var(--c-accent); color: #fff; }
+
+.tb-select {
+  width: 32px;
+  height: 28px;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  background: var(--c-bg);
+  font-size: 9px;
+  color: var(--c-text);
+  cursor: pointer;
+  padding: 0 2px;
+  appearance: none;
+  text-align: center;
+}
+
+.tb-color-input {
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  border: 2px solid var(--c-border);
+  cursor: pointer;
+  padding: 0;
+  background: none;
+  overflow: hidden;
+}
+.tb-color-input::-webkit-color-swatch-wrapper { padding: 0; }
+.tb-color-input::-webkit-color-swatch { border: none; border-radius: 50%; }
+
+.tb-color-hex {
+  width: 32px;
+  height: 22px;
+  border: 1px solid var(--c-border);
+  border-radius: 5px;
+  font-size: 8px;
+  text-align: center;
+  background: var(--c-bg);
+  color: var(--c-text);
+  padding: 0 2px;
+}
+
+.tb-range {
+  width: 28px;
+  cursor: pointer;
+  accent-color: var(--c-accent);
+  writing-mode: vertical-lr;
+  height: 48px;
+  direction: rtl;
+}
+
+/* ── Checklist Block ───────────────────────────────────── */
+.checklist-block {
+  position: absolute;
+  z-index: 10;
+  background: transparent;
+  min-width: 160px;
+  max-width: calc(100% - 80px);
+}
+
+.cl-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  line-height: var(--line-h);
+  min-height: var(--line-h);
+}
+
+.cl-checkbox {
+  width: 14px; height: 14px;
+  flex-shrink: 0;
+  cursor: pointer;
+  accent-color: var(--c-accent);
+  border-radius: 3px;
+  margin-top: 1px;
+}
+
+.cl-item-text {
+  flex: 1;
+  outline: none;
+  font-family: var(--font-writing);
+  color: var(--c-text);
+  caret-color: var(--c-accent);
+  word-break: break-word;
+  min-width: 80px;
+}
+.cl-checked .cl-item-text {
+  text-decoration: line-through;
+  color: var(--c-text-3);
+}
+
+/* ── Drawing Canvas ────────────────────────────────────── */
+canvas.drawing-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  touch-action: none;
+}
+

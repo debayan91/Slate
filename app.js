@@ -10,18 +10,21 @@
    CONSTANTS
 ═══════════════════════════════════════════════════════════ */
 const STORAGE_KEY    = 'slate_v2';
-const LINE_H         = 32;    // px — must match CSS --line-h
-const LINE_OFFSET_D  = 56;    // desktop: first line Y
-const LINE_OFFSET_M  = 52;    // mobile:  first line Y
-const MARGIN_LEFT_D  = 68;    // desktop red-margin X
-const MARGIN_LEFT_M  = 40;    // mobile red-margin X
-const PROX_Y         = 18;    // px, Y proximity for block continuation
-const PROX_X         = 140;   // px, X proximity
-const PINCH_THRESH   = 60;    // px of pinch shrink → gallery
-const SWIPE_VEL      = 0.28;  // px/ms threshold for fast swipe
-const SWIPE_PCT      = 0.22;  // % viewport for distance threshold
-const SPREAD_DUR     = 320;   // ms, spread animation
-const AUTOSAVE_MS    = 900;   // ms debounce delay
+const BASE_LINE_H    = 32;   // base line height px
+const ZOOM_STEP      = 2;    // px per zoom level
+const MIN_ZOOM       = -4;
+const MAX_ZOOM       = 6;
+const LINE_OFFSET_D  = 56;
+const LINE_OFFSET_M  = 52;
+const MARGIN_LEFT_D  = 68;
+const MARGIN_LEFT_M  = 40;
+const PROX_Y_ROWS    = 1;    // row proximity
+const PROX_X_FRAC    = 0.30; // col fraction proximity
+const PINCH_THRESH   = 60;
+const SWIPE_VEL      = 0.28;
+const SWIPE_PCT      = 0.22;
+const SPREAD_DUR     = 320;
+const AUTOSAVE_MS    = 900;
 const UNDO_LIMIT     = 50;
 
 /* ═══════════════════════════════════════════════════════════
@@ -37,14 +40,20 @@ const IS_MOBILE = (() => {
    STATE
 ═══════════════════════════════════════════════════════════ */
 const state = {
-  pages:       [],   // Array<Page>  { id, date, elements: [{id,x,y,content}] }
-  spreadIdx:   0,    // current spread index
-  view:        'notebook', // 'notebook' | 'gallery'
+  pages:       [],
+  spreadIdx:   0,
+  view:        'notebook',
   undoStack:   [],
-  user:        null, // { name, email, picture }
+  user:        null,
   online:      navigator.onLine,
   saveTimer:   null,
   animating:   false,
+  zoomLevel:   0,
+  mode:        'text',   // 'text' | 'checklist' | 'draw'
+  drawColor:   '#1a1a1a',
+  drawWidth:   2,
+  activeStyle: { font: 'serif', italic: false, underline: false, color: '#1a1a1a' },
+  activeBlockId: null,   // only one block editable at a time
 };
 
 /* ═══════════════════════════════════════════════════════════
@@ -95,10 +104,26 @@ function marginLeft()  { return IS_MOBILE ? MARGIN_LEFT_M : MARGIN_LEFT_D; }
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
+function currentLineH() {
+  return Math.max(16, BASE_LINE_H + state.zoomLevel * ZOOM_STEP);
+}
+
 function snapY(rawY) {
-  const lo = lineOffset();
+  const lo = lineOffset(), lh = currentLineH();
   if (rawY < lo) return lo;
-  return lo + Math.round((rawY - lo) / LINE_H) * LINE_H;
+  return lo + Math.round((rawY - lo) / lh) * lh;
+}
+
+function toGrid(relX, relY, pw) {
+  const lh = currentLineH(), lo = lineOffset();
+  return {
+    row: Math.max(0, Math.round((relY - lo) / lh)),
+    col: Math.max(0, Math.min(0.98, relX / Math.max(1, pw))),
+  };
+}
+
+function toPixel(row, col, pw) {
+  return { x: col * pw, y: lineOffset() + row * currentLineH() };
 }
 
 function pageTextContent(page) {
@@ -118,9 +143,24 @@ function loadData() {
     if (!raw) return;
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) throw new Error('Invalid');
+    const estW = window.innerWidth / (IS_MOBILE ? 1 : 2);
+    parsed.forEach(page => {
+      if (!page.checklists) page.checklists = [];
+      if (!page.drawings)   page.drawings   = [];
+      if (page.zoomLevel === undefined) page.zoomLevel = 0;
+      page.elements = (page.elements || []).map(el => {
+        if ('row' in el) return el;
+        const loV = IS_MOBILE ? LINE_OFFSET_M : LINE_OFFSET_D;
+        return {
+          id: el.id, content: el.content || '', style: el.style || null,
+          row: Math.max(0, Math.round(((el.y || 0) - loV) / BASE_LINE_H)),
+          col: Math.max(0, Math.min(0.98, (el.x || 0) / Math.max(1, estW))),
+        };
+      });
+    });
     state.pages = parsed;
   } catch (e) {
-    console.warn('[Slate] Load failed, starting fresh:', e);
+    console.warn('[Slate] Load failed:', e);
     state.pages = [];
     toast('Storage error — starting fresh', 'err');
   }
@@ -237,12 +277,10 @@ function confirm(msg) {
    PAGE MANAGEMENT
 ═══════════════════════════════════════════════════════════ */
 function createPage() {
-  const page = { id: uid(), date: new Date().toISOString(), elements: [] };
+  const page = { id: uid(), date: new Date().toISOString(), elements: [], checklists: [], drawings: [], zoomLevel: 0 };
   state.pages.push(page);
-  // Navigate to the new page spread
   state.spreadIdx = Math.floor((state.pages.length - 1) / pagesPerSpread());
-  saveData();
-  pushUndo();
+  saveData(); pushUndo();
   return page;
 }
 
@@ -261,28 +299,58 @@ async function deletePage(pageIdx) {
 /* ═══════════════════════════════════════════════════════════
    TEXT BLOCK RENDERING
 ═══════════════════════════════════════════════════════════ */
+function activateBlock(elData, div) {
+  // Deactivate previous active block
+  if (state.activeBlockId && state.activeBlockId !== elData.id) {
+    const prev = document.querySelector(`[data-el-id="${state.activeBlockId}"]`);
+    if (prev) {
+      prev.contentEditable = 'false';
+      prev.classList.remove('active-block');
+    }
+  }
+  state.activeBlockId = elData.id;
+  div.contentEditable = 'true';
+  div.classList.add('active-block');
+  showToolbar(elData, div);
+}
+
+function deactivateAllBlocks() {
+  if (!state.activeBlockId) return;
+  const prev = document.querySelector(`[data-el-id="${state.activeBlockId}"]`);
+  if (prev) {
+    prev.contentEditable = 'false';
+    prev.classList.remove('active-block');
+  }
+  state.activeBlockId = null;
+  hideToolbar();
+}
+
 function buildTextBlock(elData, page, pageEl) {
   const div = document.createElement('div');
   div.className = 'text-block';
-  div.contentEditable = 'true';
+  // NOT editable by default — only active block is editable
+  div.contentEditable = 'false';
   div.spellcheck = true;
   div.dataset.elId = elData.id;
-  div.style.left = `${elData.x}px`;
-  div.style.top  = `${elData.y}px`;
-  div.innerHTML  = elData.content || '';
 
-  if (!elData.content) {
-    div.setAttribute('data-placeholder', 'Start writing…');
-  }
+  const pw = pageEl.offsetWidth || 400;
+  const { x, y } = toPixel(elData.row, elData.col, pw);
+  const lh = currentLineH();
+  div.style.left       = `${x}px`;
+  div.style.top        = `${y}px`;
+  div.style.lineHeight = `${lh}px`;
+  div.style.fontSize   = `${Math.max(10, lh * 0.53)}px`;
 
-  // Paste: plain text only
+  applyBlockStyle(div, elData.style);
+  div.innerHTML = elData.content || '';
+  if (!elData.content) div.setAttribute('data-placeholder', 'Start writing…');
+
   div.addEventListener('paste', e => {
     e.preventDefault();
     const text = (e.clipboardData || window.clipboardData).getData('text/plain');
     document.execCommand('insertText', false, text);
   });
 
-  // Input: save content and trigger autosave. Update title live.
   div.addEventListener('input', () => {
     elData.content = div.innerHTML;
     if (!elData.content.replace(/<[^>]+>/g, '').trim()) {
@@ -294,19 +362,33 @@ function buildTextBlock(elData, page, pageEl) {
     updateHeaderDate();
   });
 
-  // Blur: remove empty blocks
-  div.addEventListener('blur', () => {
-    const txt = div.textContent.trim();
-    if (!txt) {
-      div.remove();
-      page.elements = page.elements.filter(e => e.id !== elData.id);
-      triggerSave();
-    }
+  // Click to activate (single-block editability)
+  div.addEventListener('mousedown', e => {
+    e.stopPropagation();
+    if (state.mode === 'draw') return;
+    activateBlock(elData, div);
+    // Let native mousedown place the cursor
   });
+  div.addEventListener('touchstart', e => {
+    e.stopPropagation();
+    if (state.mode === 'draw') return;
+    activateBlock(elData, div);
+  }, { passive: true });
 
-  // Prevent page click while editing
-  div.addEventListener('mousedown',  e => e.stopPropagation());
-  div.addEventListener('touchstart', e => e.stopPropagation(), { passive: true });
+  div.addEventListener('blur', () => {
+    // Delay to allow toolbar clicks to process first
+    setTimeout(() => {
+      // If activeBlockId changed, this block was already deactivated
+      if (state.activeBlockId !== elData.id) return;
+      const txt = div.textContent.trim();
+      if (!txt) {
+        div.remove();
+        page.elements = page.elements.filter(e => e.id !== elData.id);
+        state.activeBlockId = null;
+        triggerSave();
+      }
+    }, 250);
+  });
 
   pageEl.appendChild(div);
   return div;
@@ -317,56 +399,52 @@ function buildTextBlock(elData, page, pageEl) {
 ═══════════════════════════════════════════════════════════ */
 function placeText(clientX, clientY, pageEl) {
   if (state.animating) return;
+  if (state.mode === 'draw') return;
   const pageIdx = parseInt(pageEl.dataset.pageIdx);
   if (isNaN(pageIdx) || !state.pages[pageIdx]) return;
   const page = state.pages[pageIdx];
 
   const rect = pageEl.getBoundingClientRect();
-  let relX = clientX - rect.left;
-  let relY = clientY - rect.top;
+  const pw   = rect.width;
+  const relX = Math.max(marginLeft(), Math.min(pw - 24, clientX - rect.left));
+  const relY = clientY - rect.top;
+  const { row, col } = toGrid(relX, relY, pw);
 
-  // Y-snap to nearest ruled line
-  const snappedY = snapY(relY);
-
-  // Enforce left boundary (beyond margin)
-  const ml = marginLeft();
-  relX = clamp(relX, ml, rect.width - 24);
-
-  // Proximity: continue existing block
+  // Proximity: focus existing text block
   const existing = page.elements.find(el =>
-    Math.abs(el.y - snappedY) <= PROX_Y &&
-    relX >= el.x - PROX_X / 2 && relX <= el.x + PROX_X
+    Math.abs(el.row - row) <= PROX_Y_ROWS &&
+    Math.abs(el.col - col) <= PROX_X_FRAC
   );
-
   if (existing) {
     const domEl = pageEl.querySelector(`[data-el-id="${existing.id}"]`);
     if (domEl) {
+      activateBlock(existing, domEl);
       domEl.focus();
-      // Move caret to end
-      const sel = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(domEl);
-      range.collapse(false);
-      sel.removeAllRanges();
-      sel.addRange(range);
+      const sel = window.getSelection(), range = document.createRange();
+      range.selectNodeContents(domEl); range.collapse(false);
+      sel.removeAllRanges(); sel.addRange(range);
     }
     return;
   }
 
-  // Collision check: don't layer over existing block at same Y
-  const collision = page.elements.some(el =>
-    Math.abs(el.y - snappedY) < LINE_H * 0.5 &&
-    relX >= el.x - 10 && relX <= el.x + 200
-  );
+  // Collision check (text + checklists)
+  const collision =
+    page.elements.some(el => el.row === row && Math.abs(el.col - col) < 0.2) ||
+    (page.checklists || []).some(cl => cl.row === row && Math.abs(cl.col - col) < 0.2);
   if (collision) return;
 
-  // Create new element
-  const elData = { id: uid(), x: relX, y: snappedY, content: '' };
+  if (state.mode === 'checklist') {
+    placeChecklist(row, col, page, pageEl);
+    return;
+  }
+
+  // New text block
+  const elData = { id: uid(), row, col, content: '', style: { ...state.activeStyle } };
   page.elements.push(elData);
   triggerSave();
-
   const domEl = buildTextBlock(elData, page, pageEl);
   requestAnimationFrame(() => {
+    activateBlock(elData, domEl);
     domEl.focus();
   });
 }
@@ -375,43 +453,74 @@ function placeText(clientX, clientY, pageEl) {
    PAGE DOM BUILDER
 ═══════════════════════════════════════════════════════════ */
 function buildPage(pageIdx, position) {
-  // position: 'single' | 'left' | 'right'
   const div = document.createElement('div');
   div.className = `page ${position}`;
 
   const isReal = pageIdx >= 0 && pageIdx < state.pages.length;
-
-  if (!isReal) {
-    // Ghost placeholder (e.g. odd page on desktop)
-    div.classList.add('ghost');
-    return div;
-  }
+  if (!isReal) { div.classList.add('ghost'); return div; }
 
   div.dataset.pageIdx = pageIdx;
   const page = state.pages[pageIdx];
 
-  // Page date
   const dateEl = document.createElement('div');
   dateEl.className = 'page-date';
   dateEl.textContent = formatDate(page.date);
   div.appendChild(dateEl);
 
-  // Page number
   const numEl = document.createElement('div');
   numEl.className = 'page-num';
   numEl.textContent = pageIdx + 1;
   div.appendChild(numEl);
 
+  // Drawing canvas (inserted first, below text)
+  const canvas = buildDrawingCanvas(page, div);
+
   // Text blocks
   page.elements.forEach(el => buildTextBlock(el, page, div));
 
-  // Click → place text (DESKTOP ONLY — mobile uses touchend)
+  // Checklists
+  (page.checklists || []).forEach(cl => buildChecklist(cl, page, div));
+
+  // Click → place (DESKTOP ONLY)
   if (!IS_MOBILE) {
     div.addEventListener('click', e => {
       if (e.target.classList.contains('text-block')) return;
+      if (e.target.closest('.text-block')) return;
+      if (e.target.closest('.checklist-block')) return;
+      if (state.mode === 'draw') return;
+      // Deactivate current block before placing new one
+      deactivateAllBlocks();
       placeText(e.clientX, e.clientY, div);
     });
   }
+
+  // After DOM insertion: correct pixel positions using actual width
+  requestAnimationFrame(() => {
+    const pw  = div.offsetWidth;
+    const lh  = currentLineH();
+    canvas.width  = div.offsetWidth;
+    canvas.height = div.offsetHeight;
+    redrawCanvas(canvas, page, pw);
+
+    div.querySelectorAll('.text-block').forEach(tb => {
+      const el = page.elements.find(e => e.id === tb.dataset.elId);
+      if (!el) return;
+      const { x, y } = toPixel(el.row, el.col, pw);
+      tb.style.left       = `${x}px`;
+      tb.style.top        = `${y}px`;
+      tb.style.lineHeight = `${lh}px`;
+      tb.style.fontSize   = `${Math.max(10, lh * 0.53)}px`;
+    });
+
+    div.querySelectorAll('.checklist-block').forEach(cb => {
+      const cl = (page.checklists || []).find(c => c.id === cb.dataset.clId);
+      if (!cl) return;
+      const { x, y } = toPixel(cl.row, cl.col, pw);
+      cb.style.left     = `${x}px`;
+      cb.style.top      = `${y}px`;
+      cb.style.fontSize = `${Math.max(9, lh * 0.44)}px`;
+    });
+  });
 
   return div;
 }
@@ -1037,6 +1146,429 @@ function registerSW() {
 }
 
 /* ═══════════════════════════════════════════════════════════
+   STYLE HELPERS
+═══════════════════════════════════════════════════════════ */
+function applyBlockStyle(div, style) {
+  if (!style) return;
+  div.style.fontFamily = style.font === 'roboto'
+    ? "'Roboto', sans-serif"
+    : "var(--font-writing)";
+  div.style.fontStyle      = style.italic    ? 'italic'    : 'normal';
+  div.style.textDecoration = style.underline ? 'underline' : 'none';
+  if (style.color) div.style.color = style.color;
+}
+
+let _focusedElData = null;
+let _focusedBlock  = null;
+
+function showToolbar(elData, blockDiv) {
+  _focusedElData = elData;
+  _focusedBlock  = blockDiv;
+  const s = elData.style || state.activeStyle;
+  const fontSel = document.getElementById('tb-font');
+  const italic  = document.getElementById('tb-italic');
+  const uline   = document.getElementById('tb-underline');
+  const color   = document.getElementById('tb-color');
+  const hex     = document.getElementById('tb-color-hex');
+  if (fontSel) fontSel.value = s.font || 'serif';
+  if (italic)  italic.classList.toggle('active', !!s.italic);
+  if (uline)   uline.classList.toggle('active', !!s.underline);
+  if (color)   color.value = s.color || '#1a1a1a';
+  if (hex)     hex.value   = s.color || '#1a1a1a';
+}
+
+function hideToolbar() {
+  // Don't clear if we still have an active block (toolbar click in progress)
+  if (state.activeBlockId) return;
+  _focusedElData = null;
+  _focusedBlock  = null;
+}
+
+function updateFocusedStyle(key, value) {
+  if (!_focusedElData) return;
+  if (!_focusedElData.style) _focusedElData.style = { ...state.activeStyle };
+  _focusedElData.style[key] = value;
+  state.activeStyle[key] = value;
+  if (_focusedBlock) applyBlockStyle(_focusedBlock, _focusedElData.style);
+  triggerSave();
+}
+
+/* ═══════════════════════════════════════════════════════════
+   CHECKLIST
+═══════════════════════════════════════════════════════════ */
+function buildChecklistItem(item, clData, page) {
+  const row = document.createElement('div');
+  row.className = 'cl-item' + (item.checked ? ' cl-checked' : '');
+
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.className = 'cl-checkbox';
+  cb.checked = item.checked;
+  cb.addEventListener('change', () => {
+    item.checked = cb.checked;
+    row.classList.toggle('cl-checked', cb.checked);
+    triggerSave();
+  });
+
+  const txt = document.createElement('span');
+  txt.className = 'cl-item-text';
+  txt.contentEditable = 'true';
+  txt.textContent = item.text || '';
+  txt.setAttribute('data-placeholder', 'To-do…');
+
+  txt.addEventListener('input', () => {
+    item.text = txt.textContent;
+    triggerSave();
+  });
+
+  txt.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const idx = clData.items.indexOf(item);
+      const newItem = { text: '', checked: false };
+      clData.items.splice(idx + 1, 0, newItem);
+      triggerSave();
+      const newRow = buildChecklistItem(newItem, clData, page);
+      row.parentElement.insertBefore(newRow, row.nextSibling);
+      newRow.querySelector('.cl-item-text').focus();
+    }
+    if (e.key === 'Backspace' && !txt.textContent) {
+      e.preventDefault();
+      const idx = clData.items.indexOf(item);
+      if (clData.items.length <= 1) return; // keep at least one
+      clData.items.splice(idx, 1);
+      const prev = row.previousElementSibling;
+      row.remove();
+      if (prev) {
+        const prevTxt = prev.querySelector('.cl-item-text');
+        if (prevTxt) prevTxt.focus();
+      }
+      triggerSave();
+    }
+  });
+
+  txt.addEventListener('mousedown', e => e.stopPropagation());
+  txt.addEventListener('touchstart', e => e.stopPropagation(), { passive: true });
+
+  row.appendChild(cb);
+  row.appendChild(txt);
+  return row;
+}
+
+function buildChecklist(clData, page, pageEl) {
+  const div = document.createElement('div');
+  div.className = 'checklist-block';
+  div.dataset.clId = clData.id;
+
+  const pw = pageEl.offsetWidth || 400;
+  const { x, y } = toPixel(clData.row, clData.col, pw);
+  const lh = currentLineH();
+  div.style.left     = `${x}px`;
+  div.style.top      = `${y}px`;
+  div.style.fontSize = `${Math.max(9, lh * 0.44)}px`;
+
+  clData.items.forEach(item => {
+    div.appendChild(buildChecklistItem(item, clData, page));
+  });
+
+  div.addEventListener('mousedown', e => e.stopPropagation());
+  div.addEventListener('touchstart', e => e.stopPropagation(), { passive: true });
+
+  pageEl.appendChild(div);
+  return div;
+}
+
+function placeChecklist(row, col, page, pageEl) {
+  const clData = {
+    id: uid(),
+    row, col,
+    items: [{ text: '', checked: false }],
+  };
+  page.checklists.push(clData);
+  triggerSave();
+  const div = buildChecklist(clData, page, pageEl);
+  requestAnimationFrame(() => {
+    const firstTxt = div.querySelector('.cl-item-text');
+    if (firstTxt) firstTxt.focus();
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════
+   DRAWING
+═══════════════════════════════════════════════════════════ */
+function buildDrawingCanvas(page, pageEl) {
+  const canvas = document.createElement('canvas');
+  canvas.className = 'drawing-layer';
+  // True overlay — position via CSS, size set in buildPage rAF
+  canvas.style.position = 'absolute';
+  canvas.style.top      = '0';
+  canvas.style.left     = '0';
+  canvas.style.width    = '100%';
+  canvas.style.height   = '100%';
+  canvas.width  = 0;
+  canvas.height = 0;
+  pageEl.appendChild(canvas);
+
+  // Drawing state for this canvas
+  let drawing = false;
+  let currentStroke = null;
+
+  function getRowCol(e) {
+    const rect = pageEl.getBoundingClientRect();
+    const cx = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
+    const cy = (e.touches ? e.touches[0].clientY : e.clientY) - rect.top;
+    return toGrid(cx, cy, rect.width);
+  }
+
+  function beginStroke(e) {
+    if (state.mode !== 'draw') return;
+    e.preventDefault();
+    drawing = true;
+    const rc = getRowCol(e);
+    currentStroke = {
+      points: [rc],
+      color: state.drawColor,
+      width: state.drawWidth,
+    };
+  }
+
+  function moveStroke(e) {
+    if (!drawing || !currentStroke) return;
+    e.preventDefault();
+    const rc = getRowCol(e);
+    currentStroke.points.push(rc);
+    // Incremental draw for performance
+    const ctx = canvas.getContext('2d');
+    const pts = currentStroke.points;
+    const pw  = canvas.width;
+    if (pts.length < 2) return;
+    const prev = pts[pts.length - 2];
+    const curr = pts[pts.length - 1];
+    const p1 = toPixel(prev.row, prev.col, pw);
+    const p2 = toPixel(curr.row, curr.col, pw);
+    ctx.strokeStyle = currentStroke.color;
+    ctx.lineWidth   = currentStroke.width;
+    ctx.lineCap     = 'round';
+    ctx.lineJoin    = 'round';
+    ctx.beginPath();
+    ctx.moveTo(p1.x, p1.y);
+    ctx.lineTo(p2.x, p2.y);
+    ctx.stroke();
+  }
+
+  function endStroke(e) {
+    if (!drawing || !currentStroke) return;
+    drawing = false;
+    if (currentStroke.points.length > 1) {
+      if (!page.drawings) page.drawings = [];
+      page.drawings.push(currentStroke);
+      triggerSave();
+    }
+    currentStroke = null;
+  }
+
+  // Mouse events
+  canvas.addEventListener('mousedown',  beginStroke);
+  canvas.addEventListener('mousemove',  moveStroke);
+  canvas.addEventListener('mouseup',    endStroke);
+  canvas.addEventListener('mouseleave', endStroke);
+
+  // Touch events
+  canvas.addEventListener('touchstart', beginStroke, { passive: false });
+  canvas.addEventListener('touchmove',  moveStroke,  { passive: false });
+  canvas.addEventListener('touchend',   endStroke);
+  canvas.addEventListener('touchcancel', endStroke);
+
+  return canvas;
+}
+
+function redrawCanvas(canvas, page, pw) {
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!page.drawings || !page.drawings.length) return;
+
+  page.drawings.forEach(stroke => {
+    if (!stroke.points || stroke.points.length < 2) return;
+    ctx.strokeStyle = stroke.color || '#1a1a1a';
+    ctx.lineWidth   = stroke.width || 2;
+    ctx.lineCap     = 'round';
+    ctx.lineJoin    = 'round';
+    ctx.beginPath();
+    const first = toPixel(stroke.points[0].row, stroke.points[0].col, pw);
+    ctx.moveTo(first.x, first.y);
+    for (let i = 1; i < stroke.points.length; i++) {
+      const p = toPixel(stroke.points[i].row, stroke.points[i].col, pw);
+      ctx.lineTo(p.x, p.y);
+    }
+    ctx.stroke();
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════
+   ZOOM
+═══════════════════════════════════════════════════════════ */
+function applyZoom() {
+  const lh = currentLineH();
+  document.documentElement.style.setProperty('--line-h', `${lh}px`);
+
+  // Update all visible text blocks and checklists in-place (no full re-render)
+  document.querySelectorAll('.page[data-page-idx]').forEach(pageEl => {
+    const pageIdx = parseInt(pageEl.dataset.pageIdx);
+    const page = state.pages[pageIdx];
+    if (!page) return;
+    const pw = pageEl.offsetWidth;
+
+    pageEl.querySelectorAll('.text-block').forEach(tb => {
+      const el = page.elements.find(e => e.id === tb.dataset.elId);
+      if (!el) return;
+      const { x, y } = toPixel(el.row, el.col, pw);
+      tb.style.left       = `${x}px`;
+      tb.style.top        = `${y}px`;
+      tb.style.lineHeight = `${lh}px`;
+      tb.style.fontSize   = `${Math.max(10, lh * 0.53)}px`;
+    });
+
+    pageEl.querySelectorAll('.checklist-block').forEach(cb => {
+      const cl = (page.checklists || []).find(c => c.id === cb.dataset.clId);
+      if (!cl) return;
+      const { x, y } = toPixel(cl.row, cl.col, pw);
+      cb.style.left     = `${x}px`;
+      cb.style.top      = `${y}px`;
+      cb.style.fontSize = `${Math.max(9, lh * 0.44)}px`;
+      cb.querySelectorAll('.cl-item').forEach(item => {
+        item.style.lineHeight = `${lh}px`;
+        item.style.minHeight  = `${lh}px`;
+      });
+    });
+
+    // Redraw canvases
+    const canvas = pageEl.querySelector('canvas.drawing-layer');
+    if (canvas) {
+      canvas.width  = pw;
+      canvas.height = pageEl.offsetHeight;
+      redrawCanvas(canvas, page, pw);
+    }
+  });
+}
+
+function zoomIn() {
+  if (state.zoomLevel >= MAX_ZOOM) return;
+  state.zoomLevel++;
+  applyZoom();
+  toast(`Zoom ${state.zoomLevel > 0 ? '+' : ''}${state.zoomLevel}`);
+}
+
+function zoomOut() {
+  if (state.zoomLevel <= MIN_ZOOM) return;
+  state.zoomLevel--;
+  applyZoom();
+  toast(`Zoom ${state.zoomLevel > 0 ? '+' : ''}${state.zoomLevel}`);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   MODE SWITCHING
+═══════════════════════════════════════════════════════════ */
+function setMode(mode) {
+  state.mode = mode;
+  const textBtn  = document.getElementById('tb-mode-text');
+  const clBtn    = document.getElementById('tb-mode-checklist');
+  const drawBtn  = document.getElementById('tb-mode-draw');
+  const format   = document.getElementById('tb-format');
+  const drawCtrl = document.getElementById('tb-draw-controls');
+
+  [textBtn, clBtn, drawBtn].forEach(b => b.classList.remove('active'));
+
+  if (mode === 'text')      textBtn.classList.add('active');
+  if (mode === 'checklist') clBtn.classList.add('active');
+  if (mode === 'draw')      drawBtn.classList.add('active');
+
+  // Show/hide formatting vs draw controls
+  format.classList.toggle('hidden', mode === 'draw');
+  drawCtrl.classList.toggle('hidden', mode !== 'draw');
+
+  // Toggle pointer-events on drawing canvases
+  document.querySelectorAll('canvas.drawing-layer').forEach(c => {
+    c.style.pointerEvents = mode === 'draw' ? 'auto' : 'none';
+  });
+
+  // Deactivate text blocks when entering draw mode
+  if (mode === 'draw') {
+    deactivateAllBlocks();
+    if (document.activeElement && document.activeElement.isContentEditable) {
+      document.activeElement.blur();
+    }
+  }
+
+  // Change page cursor
+  document.querySelectorAll('.page').forEach(p => {
+    p.style.cursor = mode === 'draw' ? 'crosshair' : 'text';
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════
+   TOOLBAR WIRING
+═══════════════════════════════════════════════════════════ */
+function setupToolbar() {
+  // Mode buttons
+  document.getElementById('tb-mode-text').addEventListener('click', () => setMode('text'));
+  document.getElementById('tb-mode-checklist').addEventListener('click', () => setMode('checklist'));
+  document.getElementById('tb-mode-draw').addEventListener('click', () => setMode('draw'));
+
+  // Zoom
+  document.getElementById('zoom-in').addEventListener('click', zoomIn);
+  document.getElementById('zoom-out').addEventListener('click', zoomOut);
+
+  // Font select
+  document.getElementById('tb-font').addEventListener('change', e => {
+    updateFocusedStyle('font', e.target.value);
+  });
+
+  // Italic toggle
+  document.getElementById('tb-italic').addEventListener('click', e => {
+    const btn = e.currentTarget;
+    const newVal = !btn.classList.contains('active');
+    btn.classList.toggle('active', newVal);
+    updateFocusedStyle('italic', newVal);
+  });
+
+  // Underline toggle
+  document.getElementById('tb-underline').addEventListener('click', e => {
+    const btn = e.currentTarget;
+    const newVal = !btn.classList.contains('active');
+    btn.classList.toggle('active', newVal);
+    updateFocusedStyle('underline', newVal);
+  });
+
+  // Color picker
+  document.getElementById('tb-color').addEventListener('input', e => {
+    document.getElementById('tb-color-hex').value = e.target.value;
+    updateFocusedStyle('color', e.target.value);
+  });
+
+  // Hex input
+  document.getElementById('tb-color-hex').addEventListener('change', e => {
+    const val = e.target.value;
+    if (/^#[0-9a-fA-F]{6}$/.test(val)) {
+      document.getElementById('tb-color').value = val;
+      updateFocusedStyle('color', val);
+    }
+  });
+
+  // Draw color
+  document.getElementById('tb-draw-color').addEventListener('input', e => {
+    state.drawColor = e.target.value;
+  });
+
+  // Draw width
+  document.getElementById('tb-draw-width').addEventListener('input', e => {
+    state.drawWidth = parseInt(e.target.value) || 2;
+  });
+
+  // Initialize --line-h CSS variable
+  document.documentElement.style.setProperty('--line-h', `${currentLineH()}px`);
+}
+
+/* ═══════════════════════════════════════════════════════════
    TOP-LEVEL BUTTON WIRING
 ═══════════════════════════════════════════════════════════ */
 function setupGlobalButtons() {
@@ -1069,6 +1601,7 @@ function init() {
 
   // Shared setup
   setupGlobalButtons();
+  setupToolbar();
   setupAuthEvents();
   setupOffline();
   setupScrollIndicator();
